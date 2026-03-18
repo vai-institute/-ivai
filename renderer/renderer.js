@@ -52,6 +52,17 @@ let activeInversionType = '';
  */
 const CURRENT_USER_ID = 'peter_d';
 
+/** Loaded API keys from config. Populated by initApiKeys(). @type {Object} */
+let apiKeys = { together_ai: '', openai: '', anthropic: '' };
+
+/**
+ * Tracks streaming state for each panel slot.
+ * Key: slotId (e.g. 'std-0', 'vai-0')
+ * Value: { streaming: boolean, fullText: string }
+ * @type {Map<string, Object>}
+ */
+const slotState = new Map();
+
 // ─── DOM references ───────────────────────────────────────────────────────────
 // Resolved once on DOMContentLoaded; used throughout the module.
 
@@ -758,6 +769,9 @@ function updateProgress() {
  * @returns {void}
  */
 function loadCase(caseNumber) {
+  // Cancel any in-flight streams from the previous case before loading new one
+  window.electronAPI.cancelStream();
+
   // Find the case in the corpus array
   var c = corpus.find(function(item) { return item.case_number === caseNumber; });
   if (!c) {
@@ -828,6 +842,15 @@ function loadCase(caseNumber) {
   // ── Navigation button state ───────────────────────────────────────────────
   updateNavButtons();
   updateProgress();
+
+  // Step 6: Auto-generate both panels when a new case loads (spec Section 7.6)
+  // Set intensity selector default from case data before firing VAI call
+  var intensitySelect = document.getElementById('vai-intensity-select');
+  if (intensitySelect && c.appropriate_intensity) {
+    intensitySelect.value = c.appropriate_intensity;
+  }
+  generateStandard('std-0');
+  generateVai('vai-0');
 }
 
 /**
@@ -1003,6 +1026,263 @@ function initFilters() {
   }
 }
 
+// ─── Step 6: Response generation ──────────────────────────────────────────────
+
+/**
+ * Loads API keys from config via IPC. Stores in module-level apiKeys.
+ * Called once at startup before any generation attempt.
+ * @returns {Promise<void>}
+ */
+async function initApiKeys() {
+  try {
+    apiKeys = await window.electronAPI.readApiKeys();
+  } catch (err) {
+    console.error('[apiKeys] Failed to load:', err.message);
+  }
+}
+
+/**
+ * Returns the appropriate API key for a given model ID.
+ * Infers provider from model ID prefix.
+ *
+ * @param {string} modelId - Model ID string
+ * @returns {string} API key, or empty string if not configured
+ */
+function getApiKeyForModel(modelId) {
+  if (modelId.startsWith('claude-'))  return apiKeys.anthropic  || '';
+  if (modelId.startsWith('gpt-'))     return apiKeys.openai      || '';
+  return apiKeys.together_ai || ''; // Together AI (Llama, Mixtral, etc.)
+}
+
+/**
+ * Clears a panel body and resets its slot state in preparation
+ * for a new generation. Shows the placeholder text while empty.
+ *
+ * @param {string} bodyElementId - DOM ID of the panel body element
+ * @param {string} slotId        - Slot state key
+ * @returns {void}
+ */
+function clearPanelSlot(bodyElementId, slotId) {
+  var body = document.getElementById(bodyElementId);
+  if (body) {
+    body.innerHTML = '<div class="response-placeholder">Generating…</div>';
+  }
+  slotState.set(slotId, { streaming: true, fullText: '' });
+}
+
+/**
+ * Appends a streamed token chunk to the correct panel body.
+ * On first chunk, replaces the placeholder div with a text container.
+ * Subsequent chunks append directly to the text container.
+ *
+ * @param {string} bodyElementId - DOM ID of the panel body element
+ * @param {string} chunk         - Token text to append
+ * @returns {void}
+ */
+function appendChunk(bodyElementId, chunk) {
+  var body = document.getElementById(bodyElementId);
+  if (!body) return;
+
+  // Replace placeholder on first real chunk
+  var placeholder = body.querySelector('.response-placeholder');
+  if (placeholder) {
+    body.innerHTML = '<div class="response-text"></div>';
+  }
+
+  var textEl = body.querySelector('.response-text');
+  if (textEl) {
+    // Append text — preserve whitespace and newlines
+    textEl.textContent += chunk;
+    // Auto-scroll to bottom as tokens arrive
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
+/**
+ * Fires a Standard panel generation call.
+ * Reads the current model and variant from the panel dropdowns.
+ * Uses the current corpus case's vertical and prompt text.
+ * Clears the panel body and streams tokens in as they arrive.
+ *
+ * @param {string} [slotId='std-0'] - Panel slot identifier
+ * @returns {Promise<void>}
+ */
+async function generateStandard(slotId) {
+  slotId = slotId || 'std-0';
+
+  var currentCase = corpus[currentIndex];
+  if (!currentCase) {
+    console.warn('[gen] No current case — cannot generate.');
+    return;
+  }
+
+  var modelSelect   = document.getElementById('std-model-select');
+  var variantSelect = document.getElementById('std-variant-select');
+  var model         = modelSelect   ? modelSelect.value   : 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8';
+  var variantId     = variantSelect ? variantSelect.value : 'A';
+  var apiKey        = getApiKeyForModel(model);
+
+  if (!apiKey) {
+    var body = document.getElementById('std-panel-body');
+    if (body) {
+      body.innerHTML = '<div class="response-error">⚠ No API key configured. Open ⚙ settings to add your Together AI key.</div>';
+    }
+    return;
+  }
+
+  clearPanelSlot('std-panel-body', slotId);
+
+  try {
+    await window.electronAPI.generateStandard({
+      prompt:    currentCase.prompt,
+      vertical:  currentCase.vertical,
+      variantId: variantId,
+      model:     model,
+      slotId:    slotId,
+      apiKey:    apiKey
+    });
+  } catch (err) {
+    console.error('[gen] generateStandard failed:', err.message);
+  }
+}
+
+/**
+ * Fires a VAI panel generation call.
+ * Reads current model and intensity from the panel dropdowns.
+ * Appends the axiological context block in main.js from caseData.
+ *
+ * @param {string} [slotId='vai-0'] - Panel slot identifier
+ * @returns {Promise<void>}
+ */
+async function generateVai(slotId) {
+  slotId = slotId || 'vai-0';
+
+  var currentCase = corpus[currentIndex];
+  if (!currentCase) return;
+
+  var modelSelect     = document.getElementById('vai-model-select');
+  var intensitySelect = document.getElementById('vai-intensity-select');
+  var model           = modelSelect     ? modelSelect.value     : 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8';
+  var intensity       = intensitySelect ? intensitySelect.value : currentCase.appropriate_intensity || 'Balanced';
+  var apiKey          = getApiKeyForModel(model);
+
+  if (!apiKey) {
+    var body = document.getElementById('vai-panel-body');
+    if (body) {
+      body.innerHTML = '<div class="response-error">⚠ No API key configured. Open ⚙ settings to add your Together AI key.</div>';
+    }
+    return;
+  }
+
+  clearPanelSlot('vai-panel-body', slotId);
+
+  try {
+    await window.electronAPI.generateVai({
+      prompt:    currentCase.prompt,
+      caseData:  currentCase,
+      intensity: intensity,
+      model:     model,
+      slotId:    slotId,
+      apiKey:    apiKey
+    });
+  } catch (err) {
+    console.error('[gen] generateVai failed:', err.message);
+  }
+}
+
+/**
+ * Registers the three IPC stream event listeners (chunk, done, error).
+ * Called once at startup. Routes incoming events to the correct panel
+ * body by matching slotId to the known body element IDs.
+ *
+ * slotId → bodyElementId mapping:
+ *   'std-0' → 'std-panel-body'
+ *   'vai-0' → 'vai-panel-body'
+ *   (additional slots added in Step 11)
+ *
+ * @returns {void}
+ */
+function initStreamListeners() {
+  /**
+   * Maps a slotId to its panel body element ID.
+   * @param {string} slotId
+   * @returns {string}
+   */
+  function bodyIdForSlot(slotId) {
+    if (slotId.startsWith('std')) return 'std-panel-body';
+    if (slotId.startsWith('vai')) return 'vai-panel-body';
+    return slotId; // fallback — caller passed bodyId directly
+  }
+
+  window.electronAPI.onLlmChunk(function(data) {
+    var state = slotState.get(data.slotId);
+    if (state) {
+      state.fullText += data.content;
+    }
+    appendChunk(bodyIdForSlot(data.slotId), data.content);
+  });
+
+  window.electronAPI.onLlmDone(function(data) {
+    var state = slotState.get(data.slotId);
+    if (state) {
+      state.streaming = false;
+      state.fullText  = data.fullText;
+    }
+    console.log('[stream] ' + data.slotId + ' done in ' + data.elapsed + 's');
+
+    // Render markdown after stream completes — snap plain text to formatted HTML
+    if (data.fullText) {
+      var bodyId = data.slotId.startsWith('std') ? 'std-panel-body' : 'vai-panel-body';
+      var body   = document.getElementById(bodyId);
+      if (body) {
+        window.electronAPI.renderMarkdown(data.fullText).then(function(html) {
+          // Wrap in response-text div to preserve panel body styles
+          body.innerHTML = '<div class="response-text markdown-body">' +
+                           html + '</div>';
+        });
+      }
+    }
+
+    // TODO Step 7: enable role pills once generation is complete
+  });
+
+  window.electronAPI.onLlmError(function(data) {
+    var body = document.getElementById(bodyIdForSlot(data.slotId));
+    if (body) {
+      body.innerHTML = '<div class="response-error">⚠ ' +
+                       (data.error || 'Generation failed.') + '</div>';
+    }
+    var state = slotState.get(data.slotId);
+    if (state) state.streaming = false;
+    console.error('[stream] Error on ' + data.slotId + ':', data.error);
+  });
+}
+
+/**
+ * Wires the Regen buttons for Standard and VAI panels.
+ * Each button re-fires the generation for that panel's primary slot.
+ * Also wires the intensity selector to default from the current case
+ * appropriate_intensity field when a new case loads.
+ *
+ * @returns {void}
+ */
+function initRegenButtons() {
+  var btnRegenStd = document.getElementById('btn-regen-std');
+  var btnRegenVai = document.getElementById('btn-regen-vai');
+
+  if (btnRegenStd) {
+    btnRegenStd.addEventListener('click', function() {
+      generateStandard('std-0');
+    });
+  }
+
+  if (btnRegenVai) {
+    btnRegenVai.addEventListener('click', function() {
+      generateVai('vai-0');
+    });
+  }
+}
+
 // ─── Startup sequence ─────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1016,7 +1296,7 @@ document.addEventListener('DOMContentLoaded', function() {
   loadCorpus().then(function() {
     // Step 3: Init session (reads progress.json, shows resume dialog if needed)
     return initSession();
-  }).then(function() {
+  }).then(async function() {
     // Step 4: Apply layout and wire interactions
     initLayoutPresets();
     initDragHandles();
@@ -1025,13 +1305,17 @@ document.addEventListener('DOMContentLoaded', function() {
     initFontSizeControls();
     initSettingsModal();
 
+    // Step 6: Init API keys and stream listeners
+    await initApiKeys();
+    initStreamListeners();
+    initRegenButtons();
+
     // Step 5: Case display and navigation
     initNavigation();
     initFilters();
     var startCase = (sessionProgress && sessionProgress.last_case_number) || 1;
     loadCase(startCase);
     updateProgress();
-    // TODO Step 6: wire API generation
     // TODO Step 8: wire flag defaults from case data
     // TODO Step 9: wire Write Pair enabled state
     // TODO Step 12: register keyboard shortcuts

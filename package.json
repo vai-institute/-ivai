@@ -6,10 +6,19 @@
   "scripts": {
     "start": "electron ."
   },
-  "keywords": ["ivai", "cva", "dpo", "axiology", "arlaf"],
+  "keywords": [
+    "ivai",
+    "cva",
+    "dpo",
+    "axiology",
+    "arlaf"
+  ],
   "author": "Institute for Value-Generative AI (IVAI)",
   "license": "UNLICENSED",
   "devDependencies": {
     "electron": "^29.0.0"
+  },
+  "dependencies": {
+    "marked": "^4.3.0"
   }
 }

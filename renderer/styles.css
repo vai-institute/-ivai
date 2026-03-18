@@ -1342,3 +1342,49 @@ body {
   padding: 3px 8px;
   letter-spacing: 0.03em;
 }
+
+/* ── Markdown rendering in panel bodies ───────────────────────────────────── */
+/* Applied to .markdown-body after stream completes via marked.parse()        */
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 10px 0 4px 0;
+  color: var(--text-primary);
+}
+
+.markdown-body p {
+  margin: 0 0 8px 0;
+  line-height: 1.7;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0 0 8px 0;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+
+.markdown-body li {
+  margin-bottom: 2px;
+}
+
+.markdown-body code {
+  font-family: monospace;
+  font-size: 11px;
+  background: var(--bg-secondary);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.markdown-body strong { font-weight: 600; }
+.markdown-body em     { font-style: italic; }
+
+.markdown-body blockquote {
+  border-left: 3px solid var(--border);
+  margin: 0 0 8px 0;
+  padding-left: 10px;
+  color: var(--text-muted);
+}

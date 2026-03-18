@@ -101,7 +101,72 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   writeApiKeys: (keys) => ipcRenderer.invoke('config:write-keys', keys),
 
-  // ── Step 6:  generateStandard / generateVAI (with streaming callbacks)
+  // ── Step 6: Response generation ────────────────────────────────────────────
+
+  /**
+   * Fires a streaming Standard panel generation request.
+   * @param {Object} params - { prompt, vertical, variantId, model, slotId, apiKey }
+   * @returns {Promise<void>}
+   */
+  generateStandard: (params) => ipcRenderer.invoke('generate-standard', params),
+
+  /**
+   * Fires a streaming VAI panel generation request.
+   * @param {Object} params - { prompt, caseData, intensity, model, slotId, apiKey }
+   * @returns {Promise<void>}
+   */
+  generateVai: (params) => ipcRenderer.invoke('generate-vai', params),
+
+  /**
+   * Cancels an active stream by slotId, or all streams if no slotId given.
+   * @param {string} [slotId]
+   * @returns {Promise<void>}
+   */
+  cancelStream: (slotId) => ipcRenderer.invoke('cancel-stream', slotId),
+
+  /**
+   * Registers a callback for incoming stream token chunks.
+   * Returns an unsubscribe function — call it on navigation to avoid leaks.
+   * @param {function({slotId: string, content: string}): void} callback
+   * @returns {function} unsubscribe
+   */
+  onLlmChunk: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('llm-chunk', handler);
+    return () => ipcRenderer.removeListener('llm-chunk', handler);
+  },
+
+  /**
+   * Registers a callback for stream completion.
+   * Returns an unsubscribe function.
+   * @param {function({slotId: string, fullText: string, elapsed: string}): void} callback
+   * @returns {function} unsubscribe
+   */
+  onLlmDone: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('llm-done', handler);
+    return () => ipcRenderer.removeListener('llm-done', handler);
+  },
+
+  /**
+   * Registers a callback for stream errors.
+   * Returns an unsubscribe function.
+   * @param {function({slotId: string, error: string}): void} callback
+   * @returns {function} unsubscribe
+   */
+  onLlmError: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('llm-error', handler);
+    return () => ipcRenderer.removeListener('llm-error', handler);
+  },
+
+  /**
+   * Renders a markdown string to safe HTML via the main process.
+   * @param {string} markdown - Raw markdown text
+   * @returns {Promise<string>} HTML string
+   */
+  renderMarkdown: (markdown) => ipcRenderer.invoke('render-markdown', markdown),
+
   // ── Step 9:  writePair
   // ── Step 10: writeSkip / writeFlag
   // ── Step 13: openCurationWindow / onCaseUpdate

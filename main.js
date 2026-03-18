@@ -29,6 +29,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs   = require('fs');
+const { marked } = require('marked');
 
 /**
  * API_BASE
@@ -39,6 +40,30 @@ const fs   = require('fs');
  * @see https://ivai-production.up.railway.app/health to verify backend is live
  */
 const API_BASE = 'https://ivai-production.up.railway.app';
+
+const {
+  TEMP_STANDARD,
+  TEMP_VAI,
+  AVAILABLE_MODELS,
+  STANDARD_PROMPTS,
+  VAI_SYSTEM
+} = require('./prompts');
+
+/** Together AI endpoint — OpenAI-compatible chat completions API */
+const TOGETHER_ENDPOINT = 'https://api.together.xyz/v1/chat/completions';
+
+/** OpenAI endpoint */
+const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
+
+/** Anthropic endpoint */
+const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
+
+/**
+ * Active streaming AbortControllers keyed by slotId.
+ * Allows individual stream cancellation when CVA navigates away.
+ * @type {Map<string, AbortController>}
+ */
+const activeStreams = new Map();
 
 // ─── Window references ────────────────────────────────────────────────────────
 // Kept in module scope so they are not garbage-collected while open.
@@ -278,6 +303,323 @@ ipcMain.handle('queue:next', async (_event, userId, vertical, inversionType) => 
     console.error('[queue:next]', err.message);
     return { success: false, error: err.message };
   }
+});
+
+// ── Step 6: Streaming response generation ────────────────────────────────────
+
+/**
+ * Shared SSE streaming helper used by generate-standard and generate-vai.
+ * Makes a streaming API call to Together AI (or OpenAI/Anthropic) and
+ * forwards tokens to the renderer via llm-chunk IPC events.
+ *
+ * Supports three provider formats:
+ *   - Together AI / OpenAI: OpenAI-compatible chat completions with SSE
+ *   - Anthropic: Messages API with SSE (content_block_delta events)
+ *
+ * Provider is inferred from the model ID string:
+ *   - 'claude-' prefix → Anthropic
+ *   - 'gpt-' prefix    → OpenAI
+ *   - all others        → Together AI
+ *
+ * @param {Electron.IpcMainInvokeEvent} event    - IPC event for chunk routing
+ * @param {Object}  opts
+ * @param {string}  opts.slotId       - Panel slot ID for chunk routing
+ * @param {string}  opts.apiKey       - Provider API key
+ * @param {string}  opts.model        - Model ID
+ * @param {string}  opts.systemPrompt - Full assembled system prompt text
+ * @param {string}  opts.userPrompt   - User message content
+ * @param {number}  opts.temperature  - Sampling temperature
+ * @param {number}  opts.maxTokens    - Max tokens for this call
+ * @returns {Promise<void>}
+ */
+async function streamToPanel(event, opts) {
+  const { slotId, apiKey, model, systemPrompt, userPrompt, temperature, maxTokens } = opts;
+
+  // Infer provider from model ID
+  const isAnthropic = model.startsWith('claude-');
+  const isOpenAI    = model.startsWith('gpt-');
+  const endpoint    = isAnthropic ? ANTHROPIC_ENDPOINT
+                    : isOpenAI    ? OPENAI_ENDPOINT
+                    : TOGETHER_ENDPOINT;
+
+  const controller = new AbortController();
+  activeStreams.set(slotId, controller);
+
+  const startTime = performance.now();
+
+  try {
+    let headers, body;
+
+    if (isAnthropic) {
+      // Anthropic Messages API format
+      headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      };
+      body = {
+        model,
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+        temperature,
+        stream: true
+      };
+    } else {
+      // OpenAI-compatible format (Together AI and OpenAI)
+      headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      };
+      body = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userPrompt }
+        ],
+        temperature,
+        max_tokens: maxTokens,
+        stream: true
+      };
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      let errMsg = `HTTP ${response.status}`;
+      try { errMsg += ': ' + JSON.parse(errText).error.message; }
+      catch { errMsg += ': ' + errText.substring(0, 200); }
+      throw new Error(errMsg);
+    }
+
+    // Read the SSE stream
+    const reader  = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+    let buffer   = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          let chunkText = '';
+
+          if (isAnthropic) {
+            if (parsed.type === 'content_block_delta' &&
+                parsed.delta?.type === 'text_delta') {
+              chunkText = parsed.delta.text;
+            }
+          } else {
+            const choices = parsed.choices;
+            if (!choices || choices.length === 0) continue;
+            const delta = choices[0].delta;
+            if (!delta || !delta.content) continue;
+            chunkText = delta.content;
+          }
+
+          if (chunkText) {
+            fullText += chunkText;
+            if (!event.sender.isDestroyed()) {
+              // Route chunk to the correct panel slot in the renderer
+              event.sender.send('llm-chunk', { slotId, content: chunkText });
+            }
+          }
+        } catch {
+          // Skip unparseable SSE chunks
+        }
+      }
+    }
+
+    // Notify renderer that stream is complete
+    const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('llm-done', { slotId, fullText, elapsed });
+    }
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      // Normal cancellation on navigation — not an error
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('llm-done', { slotId, fullText: '', elapsed: '0' });
+      }
+    } else {
+      const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('llm-error', { slotId, error: err.message, elapsed });
+      }
+    }
+  } finally {
+    activeStreams.delete(slotId);
+  }
+}
+
+/**
+ * IPC handler: generate-standard
+ * @description Fires a streaming Together AI (or OpenAI/Anthropic exploration)
+ *   call for the Standard panel using the vertical's system prompt variant.
+ *   Streams tokens back to the renderer via 'llm-chunk' IPC events.
+ *   Completes with 'llm-done'. Errors with 'llm-error'.
+ *
+ *   slotId identifies the target panel slot (e.g. 'std-0', 'std-1') so the
+ *   renderer can route chunks to the correct panel body element.
+ *
+ * @param {Electron.IpcMainInvokeEvent} event
+ * @param {Object} params
+ * @param {string} params.prompt          - The corpus case prompt text
+ * @param {string} params.vertical        - Corpus vertical (key into STANDARD_PROMPTS)
+ * @param {string} params.variantId       - 'A' or 'B'
+ * @param {string} params.model           - Model ID string
+ * @param {string} params.slotId          - Panel slot identifier for chunk routing
+ * @param {string} params.apiKey          - Provider API key
+ * @returns {Promise<void>}
+ */
+ipcMain.handle('generate-standard', async (event, params) => {
+  const { prompt, vertical, variantId, model, slotId, apiKey } = params;
+
+  // Resolve system prompt from vertical + variant
+  const variants = STANDARD_PROMPTS[vertical];
+  if (!variants) {
+    event.sender.send('llm-error', {
+      slotId, error: `No standard prompt for vertical: ${vertical}`
+    });
+    return;
+  }
+  const variant = variants.find(v => v.id === variantId);
+  if (!variant) {
+    event.sender.send('llm-error', {
+      slotId, error: `No variant ${variantId} for vertical: ${vertical}`
+    });
+    return;
+  }
+
+  if (!apiKey) {
+    event.sender.send('llm-error', { slotId, error: 'API key not configured.' });
+    return;
+  }
+
+  await streamToPanel(event, {
+    slotId,
+    apiKey,
+    model,
+    systemPrompt: variant.text,
+    userPrompt: prompt,
+    temperature: TEMP_STANDARD,
+    maxTokens: 600
+  });
+});
+
+/**
+ * IPC handler: generate-vai
+ * @description Fires a streaming Together AI call for the VAI panel.
+ *   Builds the full VAI system prompt by appending an axiological context
+ *   block (Section 8.2) to VAI_SYSTEM. The context block is constructed
+ *   from the corpus case metadata passed in caseData.
+ *
+ * @param {Electron.IpcMainInvokeEvent} event
+ * @param {Object} params
+ * @param {string} params.prompt          - The corpus case prompt text
+ * @param {Object} params.caseData        - Full corpus case object
+ * @param {string} params.intensity       - Override intensity ('Light'|'Balanced'|'Direct')
+ * @param {string} params.model           - Model ID string
+ * @param {string} params.slotId          - Panel slot identifier
+ * @param {string} params.apiKey          - Together AI API key
+ * @returns {Promise<void>}
+ */
+ipcMain.handle('generate-vai', async (event, params) => {
+  const { prompt, caseData, intensity, model, slotId, apiKey } = params;
+
+  if (!apiKey) {
+    event.sender.send('llm-error', { slotId, error: 'API key not configured.' });
+    return;
+  }
+
+  // Build axiological context block (spec Section 8.2)
+  const axiologicalContext = `
+=== AXIOLOGICAL CONTEXT FOR THIS CASE ===
+Inversion type: ${caseData.inversion_type}
+Subtlety: ${caseData.subtlety}
+Inversion severity: ${caseData.inversion_severity}
+Primary person at risk (I): ${caseData.primary_entity_i}
+Systemic element creating pressure (S): ${caseData.primary_systemic_element_s}
+User underlying need: ${caseData.user_underlying_need}
+Appropriate response intensity: ${intensity}
+Identity language required: ${caseData.identity_language ? 'Yes' : 'No'}
+Boundary condition: ${caseData.boundary_condition
+    ? 'Yes — refusal with identity declaration required'
+    : 'No'}
+=========================================`;
+
+  const systemPrompt = VAI_SYSTEM + '\n\n' + axiologicalContext;
+
+  await streamToPanel(event, {
+    slotId,
+    apiKey,
+    model,
+    systemPrompt,
+    userPrompt: prompt,
+    temperature: TEMP_VAI,
+    maxTokens: 800
+  });
+});
+
+/**
+ * IPC handler: cancel-stream
+ * @description Aborts a specific active stream by slotId, or all streams
+ *   if no slotId is provided. Called when CVA navigates to a new case
+ *   mid-generation.
+ *
+ * @param {Electron.IpcMainInvokeEvent} _event
+ * @param {string} [slotId] - Specific slot to cancel. Omit to cancel all.
+ * @returns {void}
+ */
+ipcMain.handle('cancel-stream', (_event, slotId) => {
+  if (slotId) {
+    const controller = activeStreams.get(slotId);
+    if (controller) {
+      controller.abort();
+      activeStreams.delete(slotId);
+    }
+  } else {
+    // Cancel all active streams (e.g. on case navigation)
+    for (const controller of activeStreams.values()) {
+      controller.abort();
+    }
+    activeStreams.clear();
+  }
+});
+
+// ── Markdown rendering ────────────────────────────────────────────────────────
+
+/**
+ * IPC handler: render-markdown
+ * @description Renders markdown to HTML using marked.js in the main process.
+ *   Called from the renderer after stream completion to format panel text.
+ *   Runs in main process because Electron 29+ sandboxed preloads cannot
+ *   require() npm packages.
+ * @param {Electron.IpcMainInvokeEvent} _event
+ * @param {string} markdown - Raw markdown text
+ * @returns {string} HTML string
+ */
+ipcMain.handle('render-markdown', (_event, markdown) => {
+  return marked.parse(markdown || '');
 });
 
 // ── API key configuration ─────────────────────────────────────────────────────
