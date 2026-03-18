@@ -2,3 +2,5 @@
 session/progress.json
 config/api_keys.json
 output/
+
+scripts/__pycache__/
