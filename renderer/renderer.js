@@ -37,6 +37,21 @@ let sessionProgress = null;
 /** Index into corpus[] of the currently displayed case. @type {number} */
 let currentIndex = 0;
 
+/** Active vertical filter value. Empty string = no filter. @type {string} */
+let activeVertical = '';
+
+/** Active inversion type filter value. Empty string = no filter. @type {string} */
+let activeInversionType = '';
+
+/**
+ * CURRENT_USER_ID
+ * @description Hard-coded CVA user ID for session API calls.
+ *   Temporary until the Step 16 launch modal provides the user
+ *   selection UI. Replace with the selected user ID in Step 16.
+ * @type {string}
+ */
+const CURRENT_USER_ID = 'peter_d';
+
 // ─── DOM references ───────────────────────────────────────────────────────────
 // Resolved once on DOMContentLoaded; used throughout the module.
 
@@ -70,12 +85,13 @@ let currentIndex = 0;
 async function loadCorpus() {
   try {
     var result = await window.electronAPI.loadCorpus();
-    corpus = result.cases;
-    if (result.errors.length > 0) {
-      result.errors.forEach(function(e) { console.warn('[corpus]', e); });
+    if (!result.success) {
+      console.error('[corpus] Load failed:', result.error);
+      return;
     }
+    corpus = result.cases;
     console.log('[renderer] Loaded ' + corpus.length.toLocaleString() +
-                ' cases from ' + result.fileCount + ' JSONL files.');
+                ' cases from Railway API.');
     populateVerticalFilter();
   } catch (err) {
     console.error('[renderer] Corpus load failed:', err.message);
@@ -120,23 +136,24 @@ function populateVerticalFilter() {
  */
 async function initSession() {
   try {
-    var result = await window.electronAPI.readSession();
+    var result = await window.electronAPI.readSession(CURRENT_USER_ID);
 
-    if (result.isFirstLaunch || !result.progress) {
-      var resetResult = await window.electronAPI.resetSession();
-      sessionProgress = resetResult.progress;
-      console.log('[session] First launch — fresh progress created.');
+    if (!result.success || !result.session) {
+      // No session on server yet — reset to defaults
+      var resetResult = await window.electronAPI.resetSession(CURRENT_USER_ID);
+      sessionProgress = resetResult.session;
+      console.log('[session] First launch — fresh session created.');
       return;
     }
 
-    sessionProgress = result.progress;
+    sessionProgress = result.session;
 
-    if (result.progress.last_case_number !== null) {
-      await showResumeDialog(result.progress);
+    if (result.session.last_case_number && result.session.pairs_written > 0) {
+      await showResumeDialog(result.session);
     }
 
-    console.log('[session] Resuming from case #' + result.progress.last_case_number +
-                '. ' + result.progress.pairs_written + ' pairs written.');
+    console.log('[session] Resuming from case #' + result.session.last_case_number +
+                '. ' + result.session.pairs_written + ' pairs written.');
 
   } catch (err) {
     console.error('[session] initSession failed:', err.message);
@@ -176,8 +193,8 @@ function showResumeDialog(progress) {
       resumeBtn.removeEventListener('click', onResume);
       freshBtn.removeEventListener('click', onFresh);
       dialog.classList.remove('visible');
-      window.electronAPI.resetSession().then(function(r) {
-        sessionProgress = r.progress;
+      window.electronAPI.resetSession(CURRENT_USER_ID).then(function(r) {
+        sessionProgress = r.session;
         currentIndex    = 0;
         console.log('[session] CVA chose Start Fresh.');
         resolve();
@@ -196,8 +213,9 @@ function showResumeDialog(progress) {
 async function saveSession() {
   if (!sessionProgress) return;
   try {
-    var result = await window.electronAPI.writeSession(sessionProgress);
-    if (!result.ok) console.error('[session] Save failed:', result.error);
+    sessionProgress.last_updated = new Date().toISOString();
+    var result = await window.electronAPI.writeSession(CURRENT_USER_ID, sessionProgress);
+    if (!result.success) console.error('[session] Save failed:', result.error);
   } catch (err) {
     console.error('[session] saveSession threw:', err.message);
   }
@@ -625,6 +643,366 @@ function initChipRows() {
   });
 }
 
+// ─── Step 5: Case display and navigation ──────────────────────────────────────
+
+/**
+ * Returns the CSS class suffix for a badge based on field and value.
+ * Maps corpus field values to the color scheme defined in spec Section 7.4.
+ *
+ * @param {string} field  - Corpus field name ('inversion_type', 'subtlety', etc.)
+ * @param {string} value  - Field value from corpus case
+ * @returns {string} CSS class to apply to the badge element
+ */
+function getBadgeClass(field, value) {
+  var map = {
+    inversion_type: {
+      'Type I':   'badge-blue',
+      'Type II':  'badge-amber',
+      'Type III': 'badge-red',
+      'Type IV':  'badge-red'
+    },
+    subtlety: {
+      'Subtle':   'badge-green',
+      'Moderate': 'badge-amber',
+      'Overt':    'badge-red'
+    },
+    inversion_severity: {
+      'Low':      'badge-green',
+      'Moderate': 'badge-amber',
+      'Severe':   'badge-red'
+    },
+    appropriate_intensity: {
+      'Silent':   'badge-gray',
+      'Light':    'badge-green',
+      'Balanced': 'badge-blue',
+      'Direct':   'badge-red'
+    },
+    boundary_condition: {
+      true:  'badge-red',
+      false: 'badge-gray'
+    },
+    identity_language: {
+      true:   'badge-purple',
+      false:  'badge-gray'
+    }
+  };
+  var fieldMap = map[field];
+  if (!fieldMap) return '';
+  // Boolean fields — convert to string key lookup
+  var key = (typeof value === 'boolean') ? value : value;
+  return fieldMap[key] || '';
+}
+
+/**
+ * Sets text content and badge color class on a metadata value element.
+ * Removes any previously applied badge-* class before applying the new one.
+ *
+ * @param {string} elementId  - DOM element ID (e.g. 'meta-inversion-type')
+ * @param {string} text       - Display text
+ * @param {string} [field]    - Corpus field name for color lookup (optional)
+ * @param {*}      [value]    - Raw value for color lookup (optional)
+ * @returns {void}
+ */
+function setMetaBadge(elementId, text, field, value) {
+  var el = document.getElementById(elementId);
+  if (!el) return;
+  el.textContent = text;
+  // Remove any existing badge color class
+  el.className = el.className.replace(/\bbadge-\w+\b/g, '').trim();
+  if (field && value !== undefined) {
+    var cls = getBadgeClass(field, value);
+    if (cls) el.classList.add(cls);
+  }
+}
+
+/**
+ * Updates the topbar progress bar fill width, label, and stat pills
+ * to reflect the current sessionProgress state.
+ * Called after every navigation, write, skip, or flag action.
+ *
+ * @returns {void}
+ */
+function updateProgress() {
+  if (!sessionProgress) return;
+
+  var completed = (sessionProgress.completed_cases || []).length;
+  var pct       = (completed / 3200) * 100;
+
+  var fill  = document.getElementById('progress-bar-fill');
+  var label = document.getElementById('progress-label');
+  if (fill)  fill.style.width = pct + '%';
+  if (label) label.textContent = completed.toLocaleString() + ' / 3,200 cases';
+
+  var pairs   = document.getElementById('stat-pairs');
+  var skipped = document.getElementById('stat-skipped');
+  var flagged = document.getElementById('stat-flagged');
+
+  var p = sessionProgress.pairs_written || 0;
+  var s = sessionProgress.skipped       || 0;
+  var f = sessionProgress.flagged       || 0;
+
+  if (pairs)   pairs.textContent   = p + (p === 1 ? ' pair'    : ' pairs');
+  if (skipped) skipped.textContent = s + (s === 1 ? ' skipped' : ' skipped');
+  if (flagged) flagged.textContent = f + (f === 1 ? ' flagged' : ' flagged');
+}
+
+/**
+ * Loads a corpus case by case_number and populates all UI regions:
+ *   - Sidebar metadata rows and entity cards
+ *   - Prompt bar (case identifier label + prompt text)
+ *   - Prompt bar inline badges (inversion type, subtlety, intensity)
+ *   - Updates currentIndex and sessionProgress.last_case_number
+ *   - Updates Prev button enabled state
+ *
+ * @param {number} caseNumber - The case_number to display
+ * @returns {void}
+ */
+function loadCase(caseNumber) {
+  // Find the case in the corpus array
+  var c = corpus.find(function(item) { return item.case_number === caseNumber; });
+  if (!c) {
+    console.warn('[loadCase] Case #' + caseNumber + ' not found in corpus.');
+    return;
+  }
+
+  // Update module-level index
+  currentIndex = corpus.indexOf(c);
+
+  // ── Sidebar metadata ──────────────────────────────────────────────────────
+  setMetaBadge('meta-case-number', String(c.case_number));
+  setMetaBadge('meta-vertical',    c.vertical);
+  setMetaBadge('meta-inversion-type', c.inversion_type, 'inversion_type', c.inversion_type);
+  setMetaBadge('meta-subtlety',    c.subtlety,    'subtlety',    c.subtlety);
+  setMetaBadge('meta-severity',    c.inversion_severity, 'inversion_severity', c.inversion_severity);
+  setMetaBadge('meta-intensity',   c.appropriate_intensity, 'appropriate_intensity', c.appropriate_intensity);
+  setMetaBadge('meta-boundary',    c.boundary_condition ? 'Yes' : 'No',
+               'boundary_condition', c.boundary_condition);
+  setMetaBadge('meta-identity',    c.identity_language  ? 'Yes' : 'No',
+               'identity_language',  c.identity_language);
+
+  // ── Entity cards ──────────────────────────────────────────────────────────
+  var entityPerson   = document.getElementById('entity-person');
+  var entitySystemic = document.getElementById('entity-systemic');
+  var entityNeed     = document.getElementById('entity-need');
+  if (entityPerson)   entityPerson.textContent   = c.primary_entity_i          || '—';
+  if (entitySystemic) entitySystemic.textContent = c.primary_systemic_element_s || '—';
+  if (entityNeed)     entityNeed.textContent     = c.user_underlying_need       || '—';
+
+  // ── Prompt bar ────────────────────────────────────────────────────────────
+  var caseIdEl = document.getElementById('prompt-case-id');
+  if (caseIdEl) {
+    caseIdEl.textContent = 'Case #' + c.case_number + ' — ' + c.vertical;
+  }
+
+  var promptTextEl = document.getElementById('prompt-text-box') ||
+                     document.getElementById('prompt-text') ||
+                     document.getElementById('prompt-bar-text');
+  if (promptTextEl) promptTextEl.textContent = c.prompt || '';
+
+  // Prompt bar inline badges
+  var badgeType      = document.getElementById('prompt-badge-type');
+  var badgeSubtlety  = document.getElementById('prompt-badge-subtlety');
+  var badgeIntensity = document.getElementById('prompt-badge-intensity');
+  if (badgeType) {
+    badgeType.textContent = c.inversion_type;
+    badgeType.className   = badgeType.className.replace(/\bbadge-\w+\b/g, '').trim();
+    badgeType.classList.add(getBadgeClass('inversion_type', c.inversion_type));
+  }
+  if (badgeSubtlety) {
+    badgeSubtlety.textContent = c.subtlety;
+    badgeSubtlety.className   = badgeSubtlety.className.replace(/\bbadge-\w+\b/g, '').trim();
+    badgeSubtlety.classList.add(getBadgeClass('subtlety', c.subtlety));
+  }
+  if (badgeIntensity) {
+    badgeIntensity.textContent = c.appropriate_intensity;
+    badgeIntensity.className   = badgeIntensity.className.replace(/\bbadge-\w+\b/g, '').trim();
+    badgeIntensity.classList.add(getBadgeClass('appropriate_intensity', c.appropriate_intensity));
+  }
+
+  // ── Session state ─────────────────────────────────────────────────────────
+  if (sessionProgress) {
+    sessionProgress.last_case_number = c.case_number;
+    saveSession();
+  }
+
+  // ── Navigation button state ───────────────────────────────────────────────
+  updateNavButtons();
+  updateProgress();
+}
+
+/**
+ * Returns the corpus subset matching the active vertical and inversion type
+ * filters. If no filters are active, returns the full corpus array.
+ *
+ * @returns {object[]} Filtered array of case objects
+ */
+function getFilteredCorpus() {
+  return corpus.filter(function(c) {
+    var vertOk = !activeVertical      || c.vertical       === activeVertical;
+    var typeOk = !activeInversionType || c.inversion_type === activeInversionType;
+    return vertOk && typeOk;
+  });
+}
+
+/**
+ * Updates enabled/disabled state of Prev and Next buttons.
+ * Prev disabled when current case is first in the filtered set.
+ * Next always enabled — queue endpoint handles end-of-corpus.
+ *
+ * @returns {void}
+ */
+function updateNavButtons() {
+  var btnPrev = document.getElementById('btn-prev');
+  var btnNext = document.getElementById('btn-next');
+  if (!btnPrev || !btnNext) return;
+
+  var filtered = getFilteredCorpus();
+  var currentCase = corpus[currentIndex];
+  var pos = filtered.findIndex(function(c) {
+    return c.case_number === (currentCase || {}).case_number;
+  });
+
+  btnPrev.disabled = (pos <= 0);
+  btnNext.disabled = false;
+}
+
+/**
+ * Wires Prev, Next, and Jump # navigation buttons.
+ * Prev: walks backward in filtered corpus (no API call).
+ * Next: calls queue:next API for next unworked case.
+ * Jump: opens inline modal for direct case number entry.
+ *
+ * @returns {void}
+ */
+function initNavigation() {
+  var btnPrev = document.getElementById('btn-prev');
+  var btnNext = document.getElementById('btn-next');
+  var btnJump = document.getElementById('btn-jump');
+
+  if (btnPrev) {
+    btnPrev.addEventListener('click', function() {
+      var filtered    = getFilteredCorpus();
+      var currentCase = corpus[currentIndex];
+      var pos = filtered.findIndex(function(c) {
+        return c.case_number === (currentCase || {}).case_number;
+      });
+      if (pos > 0) loadCase(filtered[pos - 1].case_number);
+    });
+  }
+
+  if (btnNext) {
+    btnNext.addEventListener('click', async function() {
+      btnNext.disabled    = true;
+      btnNext.textContent = 'Loading…';
+      try {
+        var result = await window.electronAPI.queueNext(
+          CURRENT_USER_ID,
+          activeVertical      || 'all',
+          activeInversionType || 'all'
+        );
+        if (result.success && result.case_number) {
+          loadCase(result.case_number);
+        } else {
+          console.warn('[nav] queue:next returned no case:', result.error);
+        }
+      } catch (err) {
+        console.error('[nav] Next failed:', err.message);
+      } finally {
+        btnNext.textContent = 'Next ▶';
+        updateNavButtons();
+      }
+    });
+  }
+
+  if (btnJump) {
+    btnJump.addEventListener('click', function() { showJumpModal(); });
+  }
+}
+
+/**
+ * Shows the Jump to Case # inline modal.
+ * Validates the entered number against the loaded corpus.
+ * Navigates on Enter or Go; dismisses on Escape or Cancel.
+ *
+ * @returns {void}
+ */
+function showJumpModal() {
+  var existing = document.getElementById('jump-modal');
+  if (existing) existing.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'jump-modal';
+  modal.className = 'dialog-overlay visible';
+  modal.innerHTML = [
+    '<div class="dialog-card" style="width:280px;">',
+    '  <h2 style="margin-bottom:10px;">Jump to Case #</h2>',
+    '  <input type="number" id="jump-input" min="1" max="3200"',
+    '         placeholder="Enter case number…"',
+    '         style="width:100%;box-sizing:border-box;padding:6px 8px;',
+    '                font-size:13px;border:1px solid var(--border);',
+    '                border-radius:4px;background:var(--bg-secondary);" />',
+    '  <div id="jump-error" style="color:var(--error,#c00);font-size:11px;',
+    '       min-height:16px;margin-top:4px;"></div>',
+    '  <div class="dialog-btn-row" style="margin-top:12px;">',
+    '    <button class="btn-dialog-secondary" id="btn-jump-cancel">Cancel</button>',
+    '    <button class="btn-dialog-primary"   id="btn-jump-go">Go</button>',
+    '  </div>',
+    '</div>'
+  ].join('');
+  document.body.appendChild(modal);
+
+  var input     = document.getElementById('jump-input');
+  var errorEl   = document.getElementById('jump-error');
+  var btnGo     = document.getElementById('btn-jump-go');
+  var btnCancel = document.getElementById('btn-jump-cancel');
+
+  setTimeout(function() { input && input.focus(); }, 50);
+
+  function tryJump() {
+    var num   = parseInt(input.value, 10);
+    var found = corpus.find(function(c) { return c.case_number === num; });
+    if (!found) {
+      errorEl.textContent = 'Case #' + num + ' not found.';
+      return;
+    }
+    modal.remove();
+    loadCase(num);
+  }
+
+  btnGo.addEventListener('click', tryJump);
+  btnCancel.addEventListener('click', function() { modal.remove(); });
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter')  tryJump();
+    if (e.key === 'Escape') modal.remove();
+  });
+}
+
+/**
+ * Wires the vertical and inversion type filter dropdowns.
+ * Updates active filter state and refreshes nav button state
+ * without navigating away from the current case.
+ *
+ * @returns {void}
+ */
+function initFilters() {
+  var vertSelect = document.getElementById('filter-vertical');
+  var typeSelect = document.getElementById('filter-inversion');
+
+  if (vertSelect) {
+    vertSelect.addEventListener('change', function() {
+      activeVertical = vertSelect.value;
+      updateNavButtons();
+    });
+  }
+
+  if (typeSelect) {
+    typeSelect.addEventListener('change', function() {
+      activeInversionType = typeSelect.value;
+      updateNavButtons();
+    });
+  }
+}
+
 // ─── Startup sequence ─────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -647,7 +1025,12 @@ document.addEventListener('DOMContentLoaded', function() {
     initFontSizeControls();
     initSettingsModal();
 
-    // TODO Step 5: display first/resumed case
+    // Step 5: Case display and navigation
+    initNavigation();
+    initFilters();
+    var startCase = (sessionProgress && sessionProgress.last_case_number) || 1;
+    loadCase(startCase);
+    updateProgress();
     // TODO Step 6: wire API generation
     // TODO Step 8: wire flag defaults from case data
     // TODO Step 9: wire Write Pair enabled state

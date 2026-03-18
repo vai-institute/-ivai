@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm start:*)",
+      "Bash(timeout 20 npx electron .)",
+      "Bash(curl:*)"
+    ]
+  }
+}

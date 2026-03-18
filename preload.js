@@ -56,29 +56,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadCorpus: () => ipcRenderer.invoke('corpus:load'),
 
   /**
-   * Reads session/progress.json.
-   * Returns null progress on first launch or malformed file.
-   *
-   * @returns {Promise<{ progress: object|null, isFirstLaunch: boolean }>}
+   * Fetches session state for the given user from the Railway API.
+   * @param {string} userId - CVA user ID (e.g. 'peter_d')
+   * @returns {Promise<{success: boolean, session: Object|null, error?: string}>}
    */
-  readSession: () => ipcRenderer.invoke('session:read'),
+  readSession: (userId) => ipcRenderer.invoke('session:read', userId),
 
   /**
-   * Writes the given progress object to session/progress.json.
-   * Stamps last_updated in the main process before writing.
-   *
-   * @param {object} progress - Current progress state
-   * @returns {Promise<{ ok: boolean, error: string|null }>}
+   * Persists session state for the given user to the Railway API.
+   * @param {string} userId - CVA user ID
+   * @param {Object} state - Full session state object
+   * @returns {Promise<{success: boolean, error?: string}>}
    */
-  writeSession: (progress) => ipcRenderer.invoke('session:write', progress),
+  writeSession: (userId, state) => ipcRenderer.invoke('session:write', userId, state),
 
   /**
-   * Resets progress.json to factory defaults and returns the fresh state.
-   * Called when CVA chooses "Start Fresh" in the resume dialog.
-   *
-   * @returns {Promise<{ ok: boolean, progress: object, error: string|null }>}
+   * Resets session to factory defaults for the given user.
+   * @param {string} userId - CVA user ID
+   * @returns {Promise<{success: boolean, session: Object|null, error?: string}>}
    */
-  resetSession: () => ipcRenderer.invoke('session:reset'),
+  resetSession: (userId) => ipcRenderer.invoke('session:reset', userId),
+
+  /**
+   * queueNext
+   * @description Requests the next unworked case from the backend queue.
+   * @param {string} userId - CVA user ID
+   * @param {string} [vertical] - Optional vertical filter
+   * @param {string} [inversionType] - Optional inversion type filter
+   * @returns {Promise<{success: boolean, case_number: number, error?: string}>}
+   */
+  queueNext: (userId, vertical, inversionType) =>
+    ipcRenderer.invoke('queue:next', userId, vertical, inversionType),
 
   /**
    * Reads stored API keys from config/api_keys.json.

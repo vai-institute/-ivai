@@ -30,6 +30,16 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 
+/**
+ * API_BASE
+ * @description Railway backend base URL for all CVA Tool API calls.
+ *   All file I/O (corpus, session, queue, pairs, skips, flags) routes
+ *   through this endpoint. Electron is a pure frontend — no local JSONL
+ *   scanning or progress.json reads after this migration.
+ * @see https://ivai-production.up.railway.app/health to verify backend is live
+ */
+const API_BASE = 'https://ivai-production.up.railway.app';
+
 // ─── Window references ────────────────────────────────────────────────────────
 // Kept in module scope so they are not garbage-collected while open.
 
@@ -106,203 +116,167 @@ app.on('window-all-closed', () => {
 // ── Step 2: Corpus loading ────────────────────────────────────────────────────
 
 /**
- * Scans data/corpus/ for all .jsonl files, parses every line into a case
- * object, sorts by case_number ascending, and returns the full array to
- * the renderer.
- *
- * Spec reference: Section 5 — Corpus Loading.
- *
- * Log format (to main process stdout):
- *   "Loaded 3,200 cases from 32 JSONL files."
- *
- * Error handling:
- *   - Missing corpus directory: returns empty array, logs warning.
- *   - Malformed JSON line: skips line, logs warning with filename + line number.
- *   - Empty file: skipped silently (contributes 0 cases).
- *
- * @param {Electron.IpcMainInvokeEvent} _event - Electron IPC event (unused)
- * @returns {{ cases: object[], fileCount: number, errors: string[] }}
- *   cases     — full sorted case array
- *   fileCount — number of .jsonl files found
- *   errors    — non-fatal parse warnings (empty array if clean)
+ * IPC handler: corpus:load
+ * @description Fetches the full 3,200-case corpus from the Railway backend.
+ *   Replaces the previous local JSONL file scan. Returns cases sorted by
+ *   case_number ascending — the API guarantees this order.
+ * @returns {Promise<{success: boolean, cases: Array, error?: string}>}
  */
-ipcMain.handle('corpus:load', (_event) => {
-  const corpusDir = path.join(__dirname, 'data', 'corpus');
-  const errors    = [];
-
-  // Guard: corpus directory must exist
-  if (!fs.existsSync(corpusDir)) {
-    const msg = `[WARN] corpus directory not found: ${corpusDir}`;
-    console.warn(msg);
-    return { cases: [], fileCount: 0, errors: [msg] };
-  }
-
-  // Collect all .jsonl files in the directory (not recursive)
-  const files = fs.readdirSync(corpusDir)
-    .filter(f => f.endsWith('.jsonl'))
-    .sort(); // alphabetical — preserves batch order for logging
-
-  const allCases = [];
-
-  for (const filename of files) {
-    const filepath = path.join(corpusDir, filename);
-    const raw      = fs.readFileSync(filepath, 'utf8');
-    const lines    = raw.split('\n');
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue; // skip blank lines (common at end of file)
-
-      try {
-        const caseObj = JSON.parse(line);
-        allCases.push(caseObj);
-      } catch (err) {
-        // Non-fatal: log and skip malformed line
-        const msg = `[WARN] JSON parse error in ${filename} line ${i + 1}: ${err.message}`;
-        console.warn(msg);
-        errors.push(msg);
-      }
+ipcMain.handle('corpus:load', async () => {
+  try {
+    const response = await fetch(`${API_BASE}/corpus`);
+    if (!response.ok) {
+      throw new Error(`Corpus fetch failed: ${response.status} ${response.statusText}`);
     }
+    const data = await response.json();
+    // API returns { cases: [...] } — extract the array
+    const cases = Array.isArray(data) ? data : (data.cases || []);
+    console.log(`Loaded ${cases.length} cases from Railway API.`);
+    return { success: true, cases };
+  } catch (err) {
+    console.error('[corpus:load]', err.message);
+    return { success: false, error: err.message, cases: [] };
   }
-
-  // Sort by case_number ascending so navigation is always sequential
-  // regardless of the order files were read from disk.
-  allCases.sort((a, b) => a.case_number - b.case_number);
-
-  // Log to main process stdout — matches spec format (Section 5)
-  console.log(`Loaded ${allCases.length.toLocaleString()} cases from ${files.length} JSONL files.`);
-
-  return { cases: allCases, fileCount: files.length, errors };
 });
 
 // ── Step 3: Session state ─────────────────────────────────────────────────────
 
-/** Absolute path to the session progress file. */
-const SESSION_PATH = path.join(__dirname, 'session', 'progress.json');
+/**
+ * IPC handler: session:read
+ * @description Fetches CVA session state for a given user from the Railway API.
+ *   Replaces the previous progress.json read. The backend returns the stored
+ *   session object or a default session if none exists yet.
+ * @param {Electron.IpcMainInvokeEvent} _event - IPC event (unused)
+ * @param {string} userId - CVA user ID (e.g. 'peter_d')
+ * @returns {Promise<{success: boolean, session: Object|null, error?: string}>}
+ */
+ipcMain.handle('session:read', async (_event, userId) => {
+  try {
+    const response = await fetch(`${API_BASE}/session/${encodeURIComponent(userId)}`);
+    if (!response.ok) {
+      throw new Error(`Session read failed: ${response.status} ${response.statusText}`);
+    }
+    const raw = await response.json();
+    // Normalize server field names to our internal session schema (Section 4.5).
+    // Server uses current_case_number; our renderer uses last_case_number.
+    const session = {
+      last_case_number: raw.last_case_number || raw.current_case_number || 1,
+      pairs_written:    raw.pairs_written    || 0,
+      pairs_train:      raw.pairs_train      || 0,
+      pairs_holdout:    raw.pairs_holdout    || 0,
+      skipped:          raw.skipped          || 0,
+      flagged:          raw.flagged          || 0,
+      session_start:    raw.session_start    || new Date().toISOString(),
+      last_updated:     raw.last_updated     || new Date().toISOString(),
+      completed_cases:  raw.completed_cases  || [],
+      layout_preset:    raw.layout_preset    || 'wide',
+      review_mode:      raw.review_mode      || 'staged'
+    };
+    return { success: true, session };
+  } catch (err) {
+    console.error('[session:read]', err.message);
+    return { success: false, error: err.message, session: null };
+  }
+});
 
 /**
- * Default progress state written on first launch (no existing progress.json).
- * All fields defined here so later steps can rely on their presence.
- *
- * Fields from spec Section 4.5:
- *   last_case_number  — case_number of the last case the CVA was working on
- *   pairs_written     — total DPO pairs written (train + holdout)
- *   pairs_train       — pairs written to arlaf_training_data.jsonl
- *   pairs_holdout     — pairs written to arlaf_holdout_data.jsonl
- *   skipped           — cases written to skipped_cases.jsonl
- *   flagged           — cases written to flagged_cases.jsonl
- *   session_start     — ISO timestamp of first-ever session start
- *   last_updated      — ISO timestamp of most recent write
- *   completed_cases   — array of case_numbers fully processed (any outcome)
- *
- * Additional fields used by later steps:
- *   layout            — last-used layout preset (Section 7.2); default "Wide"
- *   review_mode       — staged | selective (Section 19.1); default "staged"
- *
- * @returns {object} Fresh default progress state
+ * IPC handler: session:write
+ * @description Persists CVA session state for a user to the Railway API.
+ *   Replaces the previous fs.writeFileSync to progress.json.
+ *   Called whenever the CVA navigates, writes a pair, skips, or flags.
+ * @param {Electron.IpcMainInvokeEvent} _event - IPC event (unused)
+ * @param {string} userId - CVA user ID
+ * @param {Object} state - Full session state object conforming to Section 4.5 schema
+ * @returns {Promise<{success: boolean, error?: string}>}
  */
-function defaultProgress() {
-  const now = new Date().toISOString();
-  return {
-    last_case_number: null,   // null = not yet started; set on first navigation
-    pairs_written:    0,
-    pairs_train:      0,
-    pairs_holdout:    0,
-    skipped:          0,
-    flagged:          0,
-    session_start:    now,
-    last_updated:     now,
-    completed_cases:  [],
-    layout:           'Wide',     // spec Section 7.2 default
-    review_mode:      'staged'    // spec Section 19.1 default
+ipcMain.handle('session:write', async (_event, userId, state) => {
+  try {
+    const response = await fetch(`${API_BASE}/session/${encodeURIComponent(userId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(state)
+    });
+    if (!response.ok) {
+      throw new Error(`Session write failed: ${response.status} ${response.statusText}`);
+    }
+    return { success: true };
+  } catch (err) {
+    console.error('[session:write]', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+/**
+ * IPC handler: session:reset
+ * @description Resets the CVA session to factory defaults via Railway API.
+ *   Constructs the default session object locally, posts it to the server,
+ *   and returns it to the renderer so the UI can update without a second read.
+ *   Called when the CVA chooses "Start Fresh" in the resume dialog.
+ * @param {Electron.IpcMainInvokeEvent} _event - IPC event (unused)
+ * @param {string} userId - CVA user ID
+ * @returns {Promise<{success: boolean, session: Object|null, error?: string}>}
+ */
+ipcMain.handle('session:reset', async (_event, userId) => {
+  // Default session — matches Section 4.5 data model exactly
+  const defaultSession = {
+    last_case_number: 1,
+    pairs_written: 0,
+    pairs_train: 0,
+    pairs_holdout: 0,
+    skipped: 0,
+    flagged: 0,
+    session_start: new Date().toISOString(),
+    last_updated: new Date().toISOString(),
+    completed_cases: [],
+    layout_preset: 'wide',
+    review_mode: 'staged'
   };
-}
-
-/**
- * Reads session/progress.json and returns its contents.
- * If the file does not exist (first launch), returns null — the renderer
- * interprets null as "no prior session" and skips the resume dialog.
- * If the file is malformed, logs a warning and returns null (safe fallback).
- *
- * Spec reference: Section 4.5, Step 3.
- *
- * @param {Electron.IpcMainInvokeEvent} _event - IPC event (unused)
- * @returns {{ progress: object|null, isFirstLaunch: boolean }}
- *   progress       — parsed progress object, or null if no prior session
- *   isFirstLaunch  — true if progress.json did not exist
- */
-ipcMain.handle('session:read', (_event) => {
-  if (!fs.existsSync(SESSION_PATH)) {
-    console.log('[session] No progress.json found — first launch.');
-    return { progress: null, isFirstLaunch: true };
-  }
-
   try {
-    const raw      = fs.readFileSync(SESSION_PATH, 'utf8');
-    const progress = JSON.parse(raw);
-    console.log(`[session] Resuming — last case: #${progress.last_case_number}, ` +
-                `${progress.pairs_written} pairs written.`);
-    return { progress, isFirstLaunch: false };
+    const response = await fetch(`${API_BASE}/session/${encodeURIComponent(userId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(defaultSession)
+    });
+    if (!response.ok) {
+      throw new Error(`Session reset failed: ${response.status} ${response.statusText}`);
+    }
+    return { success: true, session: defaultSession };
   } catch (err) {
-    // Malformed file — treat as first launch rather than crashing
-    console.warn(`[session] progress.json is malformed, starting fresh: ${err.message}`);
-    return { progress: null, isFirstLaunch: true };
+    console.error('[session:reset]', err.message);
+    return { success: false, error: err.message, session: null };
   }
 });
 
 /**
- * Writes the provided progress object to session/progress.json.
- * Always updates the `last_updated` timestamp before writing.
- * Uses synchronous write to prevent partial writes on crash.
- *
- * Called by the renderer after every pair write, skip, flag, or navigation.
- *
- * Spec reference: Section 4.5, Section 15.1 (sync writes).
- *
- * @param {Electron.IpcMainInvokeEvent} _event    - IPC event (unused)
- * @param {object}                      progress  - Progress object to persist
- * @returns {{ ok: boolean, error: string|null }}
- */
-ipcMain.handle('session:write', (_event, progress) => {
-  try {
-    // Always stamp last_updated at write time
-    progress.last_updated = new Date().toISOString();
-
-    // Ensure session/ directory exists (created in scaffold but defensive)
-    const sessionDir = path.dirname(SESSION_PATH);
-    if (!fs.existsSync(sessionDir)) {
-      fs.mkdirSync(sessionDir, { recursive: true });
-    }
-
-    fs.writeFileSync(SESSION_PATH, JSON.stringify(progress, null, 2), 'utf8');
-    return { ok: true, error: null };
-  } catch (err) {
-    console.error(`[session] Write failed: ${err.message}`);
-    return { ok: false, error: err.message };
-  }
-});
-
-/**
- * Creates a fresh default progress.json and writes it to disk.
- * Called when the CVA chooses "Start Fresh" in the resume dialog,
- * or on very first launch.
- *
+ * IPC handler: queue:next
+ * @description Requests the next unworked case number from the Railway queue.
+ *   The backend uses distributed queue logic to prevent two CVAs from working
+ *   the same case simultaneously. Supports optional vertical and inversion_type
+ *   filters — the backend returns the next case matching the active filter.
  * @param {Electron.IpcMainInvokeEvent} _event - IPC event (unused)
- * @returns {{ ok: boolean, progress: object, error: string|null }}
+ * @param {string} userId - CVA user ID
+ * @param {string} [vertical] - Optional vertical filter ('all' = no filter)
+ * @param {string} [inversionType] - Optional inversion type filter ('all' = no filter)
+ * @returns {Promise<{success: boolean, case_number: number, error?: string}>}
  */
-ipcMain.handle('session:reset', (_event) => {
+ipcMain.handle('queue:next', async (_event, userId, vertical, inversionType) => {
   try {
-    const fresh = defaultProgress();
-    const sessionDir = path.dirname(SESSION_PATH);
-    if (!fs.existsSync(sessionDir)) {
-      fs.mkdirSync(sessionDir, { recursive: true });
+    // Build query string — omit filter params when set to 'all'
+    const params = new URLSearchParams({ user_id: userId });
+    if (vertical && vertical !== 'all') params.append('vertical', vertical);
+    if (inversionType && inversionType !== 'all') params.append('inversion_type', inversionType);
+
+    const response = await fetch(`${API_BASE}/queue/next?${params.toString()}`);
+    if (!response.ok) {
+      throw new Error(`Queue fetch failed: ${response.status} ${response.statusText}`);
     }
-    fs.writeFileSync(SESSION_PATH, JSON.stringify(fresh, null, 2), 'utf8');
-    console.log('[session] Progress reset — starting fresh.');
-    return { ok: true, progress: fresh, error: null };
+    const data = await response.json();
+    // API returns { case: { case_number: N, ... } } — extract case_number
+    const caseNumber = data.case_number || (data.case && data.case.case_number);
+    return { success: true, case_number: caseNumber };
   } catch (err) {
-    console.error(`[session] Reset failed: ${err.message}`);
-    return { ok: false, progress: null, error: err.message };
+    console.error('[queue:next]', err.message);
+    return { success: false, error: err.message };
   }
 });
 
