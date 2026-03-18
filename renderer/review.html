@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<!--
+  renderer/review.html — Review Mode View
+  =========================================
+  Role in VAI architecture:
+    UI for the Review Mode workflow (spec Section 19). Displayed when a user
+    with the 'review' or 'senior_review' capability selects Review Mode at
+    the launch modal.
+
+    Reviewer actions: Approve, Modify + Approve, Reject ▾ (return/discard),
+    Escalate. All actions write to the audit log via main process IPC.
+
+  Populated in: Step 19 (Review Mode UI)
+  Logic:        renderer/review.js
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>Review Mode — CVA Tool — IVAI</title>
+</head>
+<body>
+  <p style="font-family: sans-serif; padding: 24px; color: #888;">
+    Review Mode — Step 19 placeholder.
+  </p>
+  <!-- TODO Step 19: Build full review queue UI per spec Section 19 -->
+  <script src="review.js"></script>
+</body>
+</html>

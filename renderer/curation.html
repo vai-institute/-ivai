@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!--
+  renderer/curation.html — Detached Curation Panel Window
+  =========================================================
+  Role in VAI architecture:
+    UI for the optional detached curation window (spec Section 11).
+    Opens in a separate BrowserWindow (480×900) when the CVA clicks
+    "Detach to second monitor" — designed for dual-monitor setups.
+
+    Single scrollable column layout (no panels, no sidebar):
+      1. Case context card (read-only)
+      2. Protocol flags (P&A, Identity Declaration)
+      3. Response mode selector
+      4. Preferred response editor (generous height, primary editing space)
+      5. Confidence + Split chips
+      6. CVA notes textarea
+      7. Action buttons (Write Pair, Write Additional Pair, Skip, Flag)
+
+    All file I/O is handled by the main process. Write actions fire IPC
+    messages (curation:pair-written, curation:skip, curation:flag) which
+    main.js handles and then broadcasts case-advance back to main window.
+
+  Populated in: Step 13 (detached curation window)
+  Logic:        renderer/curation.js
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>CVA Curation — IVAI</title>
+</head>
+<body>
+  <p style="font-family: sans-serif; padding: 24px; color: #888;">
+    Curation window — Step 13 placeholder.
+  </p>
+  <!-- TODO Step 13: Build full single-column curation UI per spec Section 11.3 -->
+  <script src="curation.js"></script>
+</body>
+</html>

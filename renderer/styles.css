@@ -1,0 +1,1344 @@
+/*
+ * styles.css — CVA Curation Tool Stylesheet
+ * ===========================================
+ * Role in VAI architecture:
+ *   All visual styling for the CVA Curation Tool main window.
+ *   Built per spec Section 7 (layout), Section 9 (right rail),
+ *   Section 10 (action buttons). Extended in later steps for
+ *   role pills (Step 7), curation controls (Step 8), and
+ *   review mode UI (Steps 16–20).
+ *
+ * Color scheme (spec Sections 7.6, 10):
+ *   Standard panel header/footer : #F1EFE8
+ *   VAI panel header/footer      : #E6F1FB
+ *   Write Pair button             : #EAF3DE (green)
+ *   Write Additional Pair         : #E6F1FB (blue)
+ *   Flag button                   : #FAEEDA (amber)
+ *
+ * Sections:
+ *   1. Reset & base
+ *   2. CSS variables
+ *   3. App shell (topbar, main-area)
+ *   4. Topbar contents
+ *   5. Drag handles
+ *   6. Sidebar
+ *   7. Center column (prompt bar + panels row)
+ *   8. Response panels (header / body / footer)
+ *   9. Right rail
+ *  10. Action buttons
+ *  11. Resume dialog (Step 3 — kept here for Step 4 modal pattern)
+ *  12. Utility / badge styles
+ */
+
+/* ── 1. Reset & base ──────────────────────────────────────────────────────── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden; /* the app is a fixed-size window — no page scroll */
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  color: var(--color-text);
+  background: var(--color-bg);
+  display: flex;
+  flex-direction: column;
+  user-select: none; /* prevents accidental text selection while dragging */
+}
+
+/* Allow text selection inside response bodies and textareas */
+.panel-body, textarea, input {
+  user-select: text;
+}
+
+/* ── 2. CSS variables ─────────────────────────────────────────────────────── */
+
+:root {
+  /* Background tiers */
+  --color-bg           : #EDECEA;   /* sidebar + rail — warm light gray */
+  --color-bg-secondary : #E4E2DE;   /* entity cards, flag rows */
+  --color-bg-panel     : #FFFFFF;   /* response panel bodies */
+  --color-bg-center    : #F7F6F3;   /* center column background */
+
+  /* Text */
+  --color-text         : #2C2B28;
+  --color-text-muted   : #888480;
+  --color-text-faint   : #B0ADA8;
+
+  /* Borders */
+  --color-border       : #D8D5D0;
+  --color-border-light : #E8E6E2;
+
+  /* Panel color scheme (spec Section 7.6) */
+  --color-standard-hf  : #F1EFE8;   /* Standard panel header + footer */
+  --color-vai-hf       : #E6F1FB;   /* VAI panel header + footer */
+
+  /* Action button fills (spec Section 10) */
+  --color-btn-write    : #EAF3DE;
+  --color-btn-write-border: #7DB85A;
+  --color-btn-write-text:   #3A6B1A;
+  --color-btn-add      : #E6F1FB;
+  --color-btn-add-border:   #3A7BD5;
+  --color-btn-add-text:     #1A4A8A;
+  --color-btn-flag     : #FAEEDA;
+  --color-btn-flag-border:  #C8862A;
+  --color-btn-flag-text:    #7A4A10;
+
+  /* Topbar */
+  --topbar-height      : 42px;
+  --color-topbar-bg    : #2C2B28;
+  --color-topbar-text  : #E8E6E2;
+
+  /* Sidebar */
+  --sidebar-width-open : 190px;
+  --sidebar-width-collapsed: 32px;
+
+  /* Right rail */
+  --rail-width-wide    : 220px;
+  --rail-width-compact : 200px;
+  --rail-width-collapsed: 32px;
+
+  /* Drag handle */
+  --drag-handle-width  : 6px;
+
+  /* Prompt bar */
+  --prompt-bar-bg      : #EDECEA;
+  --prompt-bar-border  : #D8D5D0;
+}
+
+/* ── 3. App shell ─────────────────────────────────────────────────────────── */
+
+#topbar {
+  height: var(--topbar-height);
+  min-height: var(--topbar-height);
+  background: var(--color-topbar-bg);
+  color: var(--color-topbar-text);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 12px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+#main-area {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0; /* required for flex children to respect overflow:hidden */
+}
+
+/* ── 4. Topbar contents ───────────────────────────────────────────────────── */
+
+#topbar-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+#topbar-brand .brand-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #F0EEE8;
+  letter-spacing: 0.01em;
+}
+
+#topbar-brand .brand-sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--color-text-faint);
+}
+
+/* Layout preset segmented control */
+#layout-presets {
+  display: flex;
+  border: 1px solid #4A4845;
+  border-radius: 5px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+#layout-presets button {
+  background: transparent;
+  border: none;
+  border-right: 1px solid #4A4845;
+  color: #B0ADA8;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+
+#layout-presets button:last-child {
+  border-right: none;
+}
+
+#layout-presets button:hover {
+  background: #3A3835;
+  color: #E8E6E2;
+}
+
+#layout-presets button.active {
+  background: #4A7BD5;
+  color: #fff;
+}
+
+/* Progress area — grows to fill available space */
+#topbar-progress {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+#progress-bar-wrap {
+  flex: 1;
+  min-width: 60px;
+  max-width: 200px;
+}
+
+#progress-bar-track {
+  height: 3px;
+  background: #4A4845;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#progress-bar-fill {
+  height: 100%;
+  background: #4A7BD5;
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+#progress-label {
+  font-size: 11px;
+  color: var(--color-text-faint);
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+/* Stat pills */
+#topbar-stats {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.stat-pill {
+  background: #3A3835;
+  border: 1px solid #4A4845;
+  border-radius: 12px;
+  padding: 2px 9px;
+  font-size: 11px;
+  color: #C0BDB8;
+  white-space: nowrap;
+}
+
+.stat-pill.pairs  { border-color: #4A7BD5; color: #7AABF0; }
+.stat-pill.skipped{ border-color: #888480; }
+.stat-pill.flagged{ border-color: #C8862A; color: #E8A84A; }
+
+/* Navigation buttons */
+#topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+#topbar-nav button {
+  background: #3A3835;
+  border: 1px solid #4A4845;
+  border-radius: 4px;
+  color: #C0BDB8;
+  font-size: 11px;
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+#topbar-nav button:hover {
+  background: #4A4845;
+  color: #E8E6E2;
+}
+
+#topbar-nav button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+#btn-jump {
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+/* ── 5. Drag handles ──────────────────────────────────────────────────────── */
+/* 
+ * Drag handles are 6px-wide vertical strips between resizable columns.
+ * The three-dot indicator is created with a CSS ::after pseudo-element.
+ * cursor:col-resize signals to the user that horizontal dragging is available.
+ */
+
+.drag-handle {
+  width: var(--drag-handle-width);
+  min-width: var(--drag-handle-width);
+  flex-shrink: 0;
+  background: var(--color-border-light);
+  cursor: col-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  transition: background 0.12s;
+  z-index: 5;
+}
+
+.drag-handle:hover,
+.drag-handle.dragging {
+  background: #4A7BD5;
+}
+
+/* Three vertically-stacked dots in the center of the drag handle */
+.drag-handle::after {
+  content: '';
+  display: block;
+  width: 2px;
+  height: 18px;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--color-text-faint) 0px,
+    var(--color-text-faint) 2px,
+    transparent 2px,
+    transparent 6px
+  );
+  border-radius: 1px;
+  opacity: 0.6;
+}
+
+.drag-handle:hover::after,
+.drag-handle.dragging::after {
+  background: repeating-linear-gradient(
+    to bottom,
+    #fff 0px,
+    #fff 2px,
+    transparent 2px,
+    transparent 6px
+  );
+  opacity: 1;
+}
+
+/* ── 6. Sidebar ───────────────────────────────────────────────────────────── */
+
+#sidebar {
+  width: var(--sidebar-width-open);
+  min-width: var(--sidebar-width-open);
+  max-width: var(--sidebar-width-open);
+  background: var(--color-bg);
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: width 0.15s ease, min-width 0.15s ease, max-width 0.15s ease;
+}
+
+#sidebar.collapsed {
+  width: var(--sidebar-width-collapsed);
+  min-width: var(--sidebar-width-collapsed);
+  max-width: var(--sidebar-width-collapsed);
+}
+
+#sidebar-inner {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Hide sidebar content when collapsed — show icon strip instead */
+#sidebar.collapsed #sidebar-inner  { display: none; }
+#sidebar.collapsed #sidebar-icons  { display: flex; }
+#sidebar-icons { display: none; flex-direction: column; align-items: center; padding: 8px 0; gap: 6px; }
+
+.sidebar-icon-btn {
+  width: 28px;
+  height: 28px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s;
+  position: relative;
+}
+
+.sidebar-icon-btn:hover {
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+/* Sidebar section headers */
+.sidebar-section-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-faint);
+  margin-bottom: 6px;
+}
+
+/* Key/value metadata rows */
+.meta-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 4px;
+  margin-bottom: 5px;
+  font-size: 11px;
+}
+
+.meta-key {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.meta-val {
+  text-align: right;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Badge pill — base style; color variants below */
+.badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.badge-blue   { background: #DBEAFE; color: #1D4ED8; }
+.badge-amber  { background: #FEF3C7; color: #92400E; }
+.badge-red    { background: #FEE2E2; color: #991B1B; }
+.badge-green  { background: #DCFCE7; color: #166534; }
+.badge-gray   { background: #F3F4F6; color: #4B5563; }
+.badge-purple { background: #EDE9FE; color: #5B21B6; }
+
+/* Entity cards */
+.entity-card {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  border-radius: 5px;
+  padding: 6px 8px;
+  margin-bottom: 5px;
+  font-size: 11px;
+}
+
+.entity-card-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-faint);
+  margin-bottom: 2px;
+}
+
+.entity-card-value {
+  color: var(--color-text);
+  line-height: 1.4;
+}
+
+/* Queue filter dropdowns */
+.filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.filter-row select {
+  width: 100%;
+  font-size: 11px;
+  padding: 4px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-panel);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+/* ── 7. Center column ─────────────────────────────────────────────────────── */
+
+#center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--color-bg-center);
+}
+
+/* Prompt bar (spec Section 7.5) */
+#prompt-bar {
+  background: #EBE9E4;
+  border-bottom: 1px solid var(--color-border);
+  border-left: 4px solid #4A7BD5;   /* blue left stripe — marks this as read-only context */
+  padding: 8px 12px;
+  flex-shrink: 0;
+}
+
+#prompt-bar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 5px;
+}
+
+#prompt-bar-label-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.prompt-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-faint);
+}
+
+#prompt-case-id {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
+#prompt-bar-badges {
+  display: flex;
+  gap: 5px;
+}
+
+/* The read-only prompt text box */
+#prompt-text-box {
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 6px 9px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text);
+  max-height: 72px;
+  overflow-y: auto;
+  cursor: default;
+  /* read-only — no resize handle, pointer-events kept for scroll */
+}
+
+.prompt-placeholder {
+  color: var(--color-text-faint);
+  font-style: italic;
+}
+
+/* Panels row */
+#panels-row {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── 8. Response panels ───────────────────────────────────────────────────── */
+
+.panel {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-bg-panel);
+}
+
+/* Panel header — color differs by Standard vs VAI (spec Section 7.6) */
+.panel-hdr {
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--color-border-light);
+  gap: 6px;
+}
+
+.panel-hdr-left  { display: flex; align-items: center; gap: 6px; }
+.panel-hdr-right { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+
+#panel-standard .panel-hdr { background: var(--color-standard-hf); }
+#panel-vai      .panel-hdr { background: var(--color-vai-hf); }
+
+/* Panel type badge */
+.panel-type-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.panel-type-badge.standard {
+  background: #E8E6E2;
+  color: #5A5855;
+}
+
+.panel-type-badge.vai {
+  background: #BFDBFE;
+  color: #1E40AF;
+}
+
+/* Model selector and variant/intensity dropdowns */
+.panel-hdr select {
+  font-size: 11px;
+  padding: 3px 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-panel);
+  color: var(--color-text);
+  max-width: 160px;
+}
+
+/* Regen and Add buttons in panel header */
+.btn-regen, .btn-add-slot {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-panel);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.1s;
+  white-space: nowrap;
+}
+
+.btn-regen:hover, .btn-add-slot:hover {
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+}
+
+/* Panel body — scrollable response text area */
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  font-size: var(--response-font-size, 13px); /* controlled by A+/A− buttons */
+  line-height: 1.7;
+  color: var(--color-text);
+  min-height: 0;
+}
+
+.panel-body .response-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--color-text-faint);
+  font-style: italic;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* Panel footer — role selection pills (spec Section 7.6) */
+.panel-footer {
+  padding: 6px 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+  border-top: 1px solid var(--color-border-light);
+}
+
+#panel-standard .panel-footer { background: var(--color-standard-hf); }
+#panel-vai      .panel-footer { background: var(--color-vai-hf); }
+
+/* Role pills — wired in Step 7 */
+.pill-role {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-panel);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.pill-role:hover {
+  background: var(--color-bg-secondary);
+}
+
+.pill-role.preferred {
+  background: #DCFCE7;
+  border-color: #86EFAC;
+  color: #166534;
+}
+
+.pill-role.non-preferred {
+  background: #FEE2E2;
+  border-color: #FCA5A5;
+  color: #991B1B;
+}
+
+/* ── 9. Right rail ────────────────────────────────────────────────────────── */
+
+#right-rail {
+  width: var(--rail-width-wide);
+  min-width: var(--rail-width-wide);
+  max-width: var(--rail-width-wide);
+  background: #E8E6E1;   /* slightly cooler than sidebar to distinguish the two */
+  border-left: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: width 0.15s ease, min-width 0.15s ease, max-width 0.15s ease;
+}
+
+#right-rail.collapsed {
+  width: var(--rail-width-collapsed);
+  min-width: var(--rail-width-collapsed);
+  max-width: var(--rail-width-collapsed);
+}
+
+#right-rail-inner {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#right-rail.collapsed #right-rail-inner { display: none; }
+
+/* Detach button (spec Section 9.1) */
+#btn-detach {
+  width: 100%;
+  padding: 6px;
+  border: 1px dashed var(--color-border);
+  border-radius: 5px;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.1s, border-color 0.1s;
+  flex-shrink: 0;
+}
+
+#btn-detach:hover {
+  background: var(--color-bg-secondary);
+  border-color: #4A7BD5;
+  color: #4A7BD5;
+}
+
+/* Rail section label */
+.rail-section-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-faint);
+  margin-bottom: 5px;
+}
+
+/* Toggle row for P&A and Identity flags (spec Section 9.2) */
+.flag-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  border-radius: 5px;
+}
+
+.flag-row-labels { flex: 1; }
+
+.flag-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.flag-sublabel {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  margin-top: 1px;
+}
+
+/* CSS toggle switch */
+.toggle-switch {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: #D1D5DB;
+  border-radius: 18px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 12px; height: 12px;
+  left: 3px; top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.toggle-switch input:checked + .toggle-slider { background: #4A7BD5; }
+.toggle-switch input:checked + .toggle-slider::before { transform: translateX(16px); }
+
+/* Response mode radio chips (spec Section 9.3) */
+.mode-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mode-chip {
+  padding: 6px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: var(--color-bg-panel);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+
+.mode-chip:hover { background: var(--color-bg-secondary); }
+
+.mode-chip.active {
+  background: #EFF6FF;
+  border-color: #3B82F6;
+  color: #1D4ED8;
+}
+
+/* Preferred response editor (spec Section 9.4) */
+#preferred-editor {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  padding: 8px 9px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: inherit;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: var(--color-bg-panel);
+  color: var(--color-text);
+  transition: border-color 0.15s;
+}
+
+#preferred-editor:focus {
+  outline: none;
+  border-color: #4A7BD5;
+}
+
+.hint-line {
+  font-size: 10px;
+  color: #4A7BD5;
+  margin-top: 3px;
+  min-height: 14px;
+  line-height: 1.4;
+}
+
+/* Confidence and split chips (spec Sections 9.5, 9.6) */
+.chip-row {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  padding: 4px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-panel);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+
+.chip:hover { background: var(--color-bg-secondary); }
+
+.chip.active {
+  background: #EFF6FF;
+  border-color: #3B82F6;
+  color: #1D4ED8;
+}
+
+.chip.confidence-high.active   { background: #DCFCE7; border-color: #86EFAC; color: #166534; }
+.chip.confidence-medium.active { background: #FEF3C7; border-color: #FCD34D; color: #92400E; }
+.chip.confidence-needs.active  { background: #FEE2E2; border-color: #FCA5A5; color: #991B1B; }
+
+.split-note {
+  font-size: 10px;
+  color: var(--color-text-faint);
+  margin-top: 3px;
+}
+
+/* CVA notes textarea (spec Section 9.7) */
+#cva-notes {
+  width: 100%;
+  rows: 2;
+  resize: vertical;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: inherit;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: var(--color-bg-panel);
+  color: var(--color-text);
+  min-height: 48px;
+}
+
+#cva-notes:focus { outline: none; border-color: #4A7BD5; }
+
+/* ── 10. Action buttons ───────────────────────────────────────────────────── */
+
+/* Accent border on action buttons section to separate it from the scrollable rail */
+#action-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border-top: 2px solid var(--color-border);
+  background: #DEDAD4;   /* slightly darker than rail — anchors the action zone */
+  flex-shrink: 0;
+}
+
+.btn-action {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: filter 0.1s;
+  border: 1px solid transparent;
+}
+
+.btn-action:hover:not(:disabled) { filter: brightness(0.95); }
+.btn-action:disabled { opacity: 0.4; cursor: default; }
+
+/* Write Pair → DPO (spec Section 10) */
+#btn-write-pair {
+  background: var(--color-btn-write);
+  border-color: var(--color-btn-write-border);
+  color: var(--color-btn-write-text);
+}
+
+/* + Write Additional Pair */
+#btn-write-additional {
+  background: var(--color-btn-add);
+  border-color: var(--color-btn-add-border);
+  color: var(--color-btn-add-text);
+}
+
+/* Skip ▾ — neutral, no background fill */
+#btn-skip {
+  background: var(--color-bg-panel);
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+  position: relative;
+}
+
+/* ⚑ Flag for Team Review */
+#btn-flag {
+  background: var(--color-btn-flag);
+  border-color: var(--color-btn-flag-border);
+  color: var(--color-btn-flag-text);
+}
+
+/* Validation error line above Write Pair */
+#validation-error {
+  font-size: 11px;
+  color: #991B1B;
+  background: #FEE2E2;
+  border: 1px solid #FCA5A5;
+  border-radius: 4px;
+  padding: 5px 8px;
+  display: none;
+}
+
+#validation-error.visible { display: block; }
+
+/* ── 11. Resume dialog ────────────────────────────────────────────────────── */
+
+#resume-dialog {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+#resume-dialog.visible { display: flex; }
+
+.dialog-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 32px 40px;
+  min-width: 360px;
+  max-width: 480px;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+}
+
+.dialog-card h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 8px;
+}
+
+.dialog-card p {
+  font-size: 13px;
+  color: var(--color-text-muted);
+  margin-bottom: 24px;
+}
+
+.dialog-btn-row {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.btn-dialog-secondary {
+  padding: 8px 20px;
+  border-radius: 5px;
+  border: 1px solid var(--color-border);
+  background: #F5F5F5;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn-dialog-primary {
+  padding: 8px 20px;
+  border-radius: 5px;
+  border: 1px solid #3A7BD5;
+  background: #3A7BD5;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ── 12. Utility ──────────────────────────────────────────────────────────── */
+
+/* Scrollbar styling — subtle on all scrollable regions */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+
+/* Thin divider rule */
+.divider {
+  height: 1px;
+  background: var(--color-border-light);
+  margin: 4px 0;
+}
+
+/* ── 13. Topbar extras — font size + gear ────────────────────────────────── */
+
+/* Font size +/- buttons */
+#topbar-fontsize {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+#topbar-fontsize button {
+  background: #3A3835;
+  border: 1px solid #4A4845;
+  border-radius: 4px;
+  color: #C0BDB8;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: background 0.12s;
+  letter-spacing: -0.02em;
+}
+
+#topbar-fontsize button:hover {
+  background: #4A4845;
+  color: #E8E6E2;
+}
+
+/* Gear icon button — matches demo app pattern */
+#btn-settings {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: #888480;
+  font-size: 16px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  padding: 0;
+}
+
+#btn-settings:hover {
+  background: #3A3835;
+  color: #E8E6E2;
+  border-color: #4A4845;
+}
+
+#btn-settings.active {
+  color: #4A9FD5;
+  border-color: #4A9FD5;
+}
+
+/* ── 14. Settings modal ───────────────────────────────────────────────────── */
+
+#settings-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+}
+
+#settings-modal.visible { display: flex; }
+
+.settings-card {
+  min-width: 440px;
+  max-width: 520px;
+  width: 100%;
+  text-align: left;           /* override dialog-card center alignment */
+  padding: 24px 28px;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.settings-header h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  text-align: left;
+  margin-bottom: 0;
+}
+
+#btn-settings-close {
+  background: none;
+  border: none;
+  font-size: 14px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+
+#btn-settings-close:hover {
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+}
+
+.settings-subhead {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-bottom: 18px;
+  text-align: left;
+}
+
+.settings-subhead code {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  background: var(--color-bg-secondary);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.settings-provider-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Training-eligible vs exploration-only badge in settings */
+.settings-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+
+.settings-badge.training {
+  background: #DCFCE7;
+  color: #166534;
+}
+
+.settings-badge.exploration {
+  background: #FEF3C7;
+  color: #92400E;
+}
+
+.settings-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.settings-input-row input {
+  flex: 1;
+  font-size: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: var(--color-bg-panel);
+  color: var(--color-text);
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.03em;
+}
+
+.settings-input-row input:focus {
+  outline: none;
+  border-color: #4A7BD5;
+}
+
+/* Show/Hide toggle button beside each key field */
+.btn-toggle-visibility {
+  font-size: 11px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+
+.btn-toggle-visibility:hover {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.settings-hint {
+  font-size: 10px;
+  color: var(--color-text-faint);
+  line-height: 1.4;
+}
+
+/* Save status feedback line */
+#settings-save-status {
+  font-size: 11px;
+  min-height: 18px;
+  margin-top: 10px;
+  padding: 0 2px;
+}
+
+#settings-save-status.success { color: #166534; }
+#settings-save-status.error   { color: #991B1B; }
+
+/* ── Exploration-only panel indicator (Step 6 — styles ready now) ──────── */
+/*
+ * When an exploration-only model (OpenAI/Anthropic) is selected, the panel
+ * header shows a warning stripe and the footer role pills are hidden.
+ * Applied via JS in Step 6 when model selection changes.
+ */
+.panel.exploration-mode .panel-footer {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.exploration-warning {
+  font-size: 10px;
+  font-weight: 600;
+  color: #92400E;
+  background: #FEF3C7;
+  border: 1px solid #FCD34D;
+  border-radius: 4px;
+  padding: 3px 8px;
+  letter-spacing: 0.03em;
+}

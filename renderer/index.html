@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<!--
+  renderer/index.html — Main CVA Workstation Window
+  ==================================================
+  Role in VAI architecture:
+    Full four-region layout shell for the CVA Curation Tool.
+    Regions: Topbar / Sidebar / Center (Prompt Bar + Panels) / Right Rail.
+    All drag handles and layout preset switching are implemented here
+    and in renderer.js.
+
+    Content is wired to corpus data in Step 5.
+    API calls and streaming are added in Step 6.
+    Role pill logic in Step 7. Right rail controls in Step 8.
+    Write Pair / Skip / Flag actions in Steps 9–10.
+
+  Styles:   renderer/styles.css
+  Logic:    renderer/renderer.js
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CVA Curation Tool — IVAI</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       TOPBAR
+       Contains: brand, layout presets, progress, stat pills, navigation.
+       Spec Section 7.3.
+  ════════════════════════════════════════════════════════════════════ -->
+  <div id="topbar">
+
+    <!-- Brand -->
+    <div id="topbar-brand">
+      <span class="brand-name">CVA Tool</span>
+      <span class="brand-sub">— IVAI</span>
+    </div>
+
+    <!-- Layout preset segmented control (spec Section 7.2) -->
+    <div id="layout-presets">
+      <button id="preset-compact"      title="Compact layout">Compact</button>
+      <button id="preset-wide" class="active" title="Wide layout">Wide</button>
+      <button id="preset-dual"         title="Dual monitor layout">Dual</button>
+    </div>
+
+    <!-- Progress bar + label -->
+    <div id="topbar-progress">
+      <div id="progress-bar-wrap">
+        <div id="progress-bar-track">
+          <div id="progress-bar-fill"></div>
+        </div>
+        <div id="progress-label">0 / 3,200 cases</div>
+      </div>
+    </div>
+
+    <!-- Stat pills -->
+    <div id="topbar-stats">
+      <span class="stat-pill pairs"   id="stat-pairs">0 pairs</span>
+      <span class="stat-pill skipped" id="stat-skipped">0 skipped</span>
+      <span class="stat-pill flagged" id="stat-flagged">0 flagged</span>
+    </div>
+
+    <!-- Navigation -->
+    <div id="topbar-nav">
+      <button id="btn-prev" disabled title="Previous case (Alt+←)">◀ Prev</button>
+      <button id="btn-next" disabled title="Next case (Alt+→)">Next ▶</button>
+      <button id="btn-jump" title="Jump to case number">Jump #</button>
+    </div>
+
+    <!-- Font size controls -->
+    <div id="topbar-fontsize" title="Adjust response text size">
+      <button id="btn-font-decrease" title="Decrease font size">A−</button>
+      <button id="btn-font-increase" title="Increase font size">A+</button>
+    </div>
+
+    <!-- Settings gear icon -->
+    <button id="btn-settings" title="API key settings">⚙</button>
+
+  </div><!-- /#topbar -->
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       MAIN AREA — horizontal flex row
+       Sidebar | drag | Center | drag | Right Rail
+  ════════════════════════════════════════════════════════════════════ -->
+  <div id="main-area">
+
+    <!-- ── SIDEBAR ─────────────────────────────────────────────────────
+         Open: 190px wide. Collapsed: 32px icon strip.
+         Spec Section 7.4.
+    ───────────────────────────────────────────────────────────────── -->
+    <div id="sidebar">
+
+      <!-- Collapsed state: icon strip -->
+      <div id="sidebar-icons">
+        <button class="sidebar-icon-btn" id="sidebar-expand-btn"
+                title="Expand sidebar">☰</button>
+      </div>
+
+      <!-- Open state: scrollable content -->
+      <div id="sidebar-inner">
+
+        <!-- Case metadata section -->
+        <div id="sidebar-metadata">
+          <div class="sidebar-section-label">Case metadata</div>
+
+          <div class="meta-row">
+            <span class="meta-key">Case #</span>
+            <span class="meta-val" id="meta-case-number">—</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-key">Vertical</span>
+            <span class="meta-val" id="meta-vertical" style="font-size:10px;">—</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-key">Type</span>
+            <span class="meta-val" id="meta-inversion-type">—</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-key">Subtlety</span>
+            <span class="meta-val" id="meta-subtlety">—</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-key">Severity</span>
+            <span class="meta-val" id="meta-severity">—</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-key">Intensity</span>
+            <span class="meta-val" id="meta-intensity">—</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-key">Boundary</span>
+            <span class="meta-val" id="meta-boundary">—</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-key">Identity</span>
+            <span class="meta-val" id="meta-identity">—</span>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Entities section -->
+        <div id="sidebar-entities">
+          <div class="sidebar-section-label">Entities</div>
+
+          <div class="entity-card">
+            <div class="entity-card-label">Person at risk (I)</div>
+            <div class="entity-card-value" id="entity-person">—</div>
+          </div>
+          <div class="entity-card">
+            <div class="entity-card-label">Systemic pressure (S)</div>
+            <div class="entity-card-value" id="entity-systemic">—</div>
+          </div>
+          <div class="entity-card">
+            <div class="entity-card-label">Underlying need</div>
+            <div class="entity-card-value" id="entity-need">—</div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Queue filters section -->
+        <div id="sidebar-filters">
+          <div class="sidebar-section-label">Queue filters</div>
+          <div class="filter-row">
+            <select id="filter-vertical" title="Filter by vertical">
+              <option value="">All verticals</option>
+            </select>
+            <select id="filter-inversion" title="Filter by inversion type">
+              <option value="">All types</option>
+              <option value="Type I">Type I</option>
+              <option value="Type II">Type II</option>
+              <option value="Type III">Type III</option>
+              <option value="Type IV">Type IV</option>
+            </select>
+          </div>
+        </div>
+
+      </div><!-- /#sidebar-inner -->
+    </div><!-- /#sidebar -->
+
+
+    <!-- Drag handle: sidebar ↔ center -->
+    <div class="drag-handle" id="drag-sidebar" title="Drag to resize sidebar"></div>
+
+
+    <!-- ── CENTER COLUMN ───────────────────────────────────────────────
+         Contains: Prompt Bar above, Panels Row below.
+         Spec Sections 7.5 and 7.6.
+    ───────────────────────────────────────────────────────────────── -->
+    <div id="center">
+
+      <!-- Prompt bar (read-only) -->
+      <div id="prompt-bar">
+        <div id="prompt-bar-header">
+          <div id="prompt-bar-label-wrap">
+            <span class="prompt-label">Original Prompt</span>
+            <span id="prompt-case-id">—</span>
+          </div>
+          <div id="prompt-bar-badges">
+            <!-- Populated in Step 5 -->
+          </div>
+        </div>
+        <div id="prompt-text-box">
+          <span class="prompt-placeholder">Navigate to a case to load the prompt.</span>
+        </div>
+      </div>
+
+      <!-- Panels row: Standard | drag | VAI -->
+      <div id="panels-row">
+
+        <!-- Standard panel -->
+        <div class="panel" id="panel-standard">
+          <div class="panel-hdr">
+            <div class="panel-hdr-left">
+              <span class="panel-type-badge standard">Standard</span>
+              <select id="std-model-select" title="Model">
+                <option value="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8">Llama 4 Maverick</option>
+                <option value="mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral 8x7B</option>
+              </select>
+            </div>
+            <div class="panel-hdr-right">
+              <select id="std-variant-select" title="Prompt variant">
+                <option value="A">Variant A</option>
+                <option value="B">Variant B</option>
+              </select>
+              <button class="btn-regen" id="btn-regen-std"
+                      title="Regenerate standard response (Alt+R)">↺ Regen</button>
+              <button class="btn-add-slot" id="btn-add-std"
+                      title="Add response slot">+ Add</button>
+            </div>
+          </div>
+          <div class="panel-body" id="std-panel-body">
+            <div class="response-placeholder">Click ↺ to generate a response.</div>
+          </div>
+          <div class="panel-footer" id="std-panel-footer">
+            <button class="pill-role" id="pill-std-nonpref"
+                    title="Mark as non-preferred">✕ Non-preferred</button>
+            <button class="pill-role" id="pill-std-pref"
+                    title="Mark as preferred">✓ Preferred</button>
+          </div>
+        </div>
+
+        <!-- Drag handle: standard ↔ VAI panel -->
+        <div class="drag-handle" id="drag-panels" title="Drag to resize panels"></div>
+
+        <!-- VAI panel -->
+        <div class="panel" id="panel-vai">
+          <div class="panel-hdr">
+            <div class="panel-hdr-left">
+              <span class="panel-type-badge vai">VAI</span>
+              <select id="vai-model-select" title="Model">
+                <option value="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8">Llama 4 Maverick</option>
+                <option value="mistralai/Mixtral-8x7B-Instruct-v0.1">Mixtral 8x7B</option>
+              </select>
+            </div>
+            <div class="panel-hdr-right">
+              <select id="vai-intensity-select" title="Axiological intensity">
+                <option value="Light">Light</option>
+                <option value="Balanced" selected>Balanced</option>
+                <option value="Direct">Direct</option>
+              </select>
+              <button class="btn-regen" id="btn-regen-vai"
+                      title="Regenerate VAI response (Alt+V)">↺ Regen</button>
+              <button class="btn-add-slot" id="btn-add-vai"
+                      title="Add response slot">+ Add</button>
+            </div>
+          </div>
+          <div class="panel-body" id="vai-panel-body">
+            <div class="response-placeholder">Click ↺ to generate a response.</div>
+          </div>
+          <div class="panel-footer" id="vai-panel-footer">
+            <button class="pill-role" id="pill-vai-nonpref"
+                    title="Mark as non-preferred">✕ Non-preferred</button>
+            <button class="pill-role" id="pill-vai-pref"
+                    title="Mark as preferred">✓ Preferred</button>
+          </div>
+        </div>
+
+      </div><!-- /#panels-row -->
+    </div><!-- /#center -->
+
+
+    <!-- Drag handle: center ↔ right rail -->
+    <div class="drag-handle" id="drag-rail" title="Drag to resize rail"></div>
+
+
+    <!-- ── RIGHT RAIL ──────────────────────────────────────────────────
+         CVA's primary decision instrument. Spec Sections 9–10.
+    ───────────────────────────────────────────────────────────────── -->
+    <div id="right-rail">
+
+      <div id="right-rail-inner">
+
+        <!-- Detach button (spec Section 9.1) -->
+        <button id="btn-detach">⬡ Detach to second monitor</button>
+
+        <!-- Protocol flags (spec Section 9.2) -->
+        <div>
+          <div class="rail-section-label">Protocol flags</div>
+          <div class="flag-row">
+            <div class="flag-row-labels">
+              <div class="flag-label">Pause-and-Ask</div>
+              <div class="flag-sublabel">Preferred must pause before responding</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="flag-pna" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div style="height:5px;"></div>
+          <div class="flag-row">
+            <div class="flag-row-labels">
+              <div class="flag-label">Identity declaration</div>
+              <div class="flag-sublabel">VAI declares identity, not rules</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="flag-identity" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Response mode (spec Section 9.3) -->
+        <div>
+          <div class="rail-section-label">Response mode</div>
+          <div class="mode-chips">
+            <button class="mode-chip active" data-mode="standard-vai">Standard VAI</button>
+            <button class="mode-chip"        data-mode="humanizing">Humanizing pipeline</button>
+            <button class="mode-chip"        data-mode="boundary">Boundary / Silent</button>
+          </div>
+        </div>
+
+        <!-- Preferred response editor (spec Section 9.4) -->
+        <div>
+          <div class="rail-section-label">Preferred response</div>
+          <textarea id="preferred-editor"
+            placeholder="Select a response as Preferred above, then edit here."
+          ></textarea>
+          <div class="hint-line" id="hint-line"></div>
+        </div>
+
+        <!-- Confidence rating (spec Section 9.5) -->
+        <div>
+          <div class="rail-section-label">Confidence</div>
+          <div class="chip-row">
+            <button class="chip confidence-high"   data-confidence="High">High</button>
+            <button class="chip confidence-medium" data-confidence="Medium">Medium</button>
+            <button class="chip confidence-needs"  data-confidence="Needs Review">Needs Review</button>
+          </div>
+        </div>
+
+        <!-- Dataset split (spec Section 9.6) -->
+        <div>
+          <div class="rail-section-label">Dataset split</div>
+          <div class="chip-row">
+            <button class="chip active" data-split="train">Train</button>
+            <button class="chip"        data-split="holdout">Held-out</button>
+          </div>
+          <div class="split-note" id="split-note">
+            Current split: 0 train / 0 held-out
+          </div>
+        </div>
+
+        <!-- CVA notes (spec Section 9.7) -->
+        <div>
+          <div class="rail-section-label">CVA notes</div>
+          <textarea id="cva-notes" rows="2"
+            placeholder="Reasoning, concerns, or team notes..."
+          ></textarea>
+        </div>
+
+      </div><!-- /#right-rail-inner -->
+
+      <!-- Action buttons fixed at bottom of rail (spec Section 10) -->
+      <div id="action-buttons">
+        <div id="validation-error"></div>
+        <button class="btn-action" id="btn-write-pair" disabled
+                title="Write DPO pair (Alt+W)">Write Pair → DPO</button>
+        <button class="btn-action" id="btn-write-additional" disabled
+                title="Write additional pair (Alt+A)">+ Write Additional Pair</button>
+        <button class="btn-action" id="btn-skip"
+                title="Skip this case (Alt+S)">Skip ▾</button>
+        <button class="btn-action" id="btn-flag"
+                title="Flag for team review (Alt+F)">⚑ Flag for Team Review</button>
+      </div>
+
+    </div><!-- /#right-rail -->
+
+  </div><!-- /#main-area -->
+
+
+  <!-- ── Settings modal — API keys (gear icon in topbar) ───────────────────── -->
+  <div id="settings-modal">
+    <div class="dialog-card settings-card">
+      <div class="settings-header">
+        <h2>⚙ API Key Settings</h2>
+        <button id="btn-settings-close" title="Close">✕</button>
+      </div>
+      <p class="settings-subhead">
+        Keys are stored locally in <code>config/api_keys.json</code>.
+      </p>
+
+      <div class="settings-fields">
+
+        <div class="settings-field">
+          <label class="settings-label">
+            <span class="settings-provider-name">Together AI</span>
+            <span class="settings-badge training">training-eligible</span>
+          </label>
+          <div class="settings-input-row">
+            <input type="password" id="key-together" placeholder="Enter Together AI API key…" autocomplete="off" />
+            <button class="btn-toggle-visibility" data-target="key-together">Show</button>
+          </div>
+          <div class="settings-hint">Used for Llama 4 Maverick and Mixtral — DPO training output enabled.</div>
+        </div>
+
+        <div class="settings-field">
+          <label class="settings-label">
+            <span class="settings-provider-name">OpenAI</span>
+            <span class="settings-badge exploration">exploration only</span>
+          </label>
+          <div class="settings-input-row">
+            <input type="password" id="key-openai" placeholder="Enter OpenAI API key…" autocomplete="off" />
+            <button class="btn-toggle-visibility" data-target="key-openai">Show</button>
+          </div>
+          <div class="settings-hint">GPT-4o / GPT-4o mini — role pills and copy disabled. Not written to training data.</div>
+        </div>
+
+        <div class="settings-field">
+          <label class="settings-label">
+            <span class="settings-provider-name">Anthropic</span>
+            <span class="settings-badge exploration">exploration only</span>
+          </label>
+          <div class="settings-input-row">
+            <input type="password" id="key-anthropic" placeholder="Enter Anthropic API key…" autocomplete="off" />
+            <button class="btn-toggle-visibility" data-target="key-anthropic">Show</button>
+          </div>
+          <div class="settings-hint">Claude Sonnet / Haiku — role pills and copy disabled. Not written to training data.</div>
+        </div>
+
+      </div>
+
+      <div id="settings-save-status"></div>
+
+      <div class="dialog-btn-row" style="margin-top:16px;">
+        <button class="btn-dialog-secondary" id="btn-settings-cancel">Cancel</button>
+        <button class="btn-dialog-primary"   id="btn-settings-save">Save Keys</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Resume dialog (Step 3 — styled via styles.css) ─────────────────── -->
+  <div id="resume-dialog">
+    <div class="dialog-card">
+      <h2>Resume session?</h2>
+      <p id="resume-message">Previous session found.</p>
+      <div class="dialog-btn-row">
+        <button class="btn-dialog-secondary" id="btn-start-fresh">Start Fresh</button>
+        <button class="btn-dialog-primary"   id="btn-resume">Resume ▶</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+
+</body>
+</html>

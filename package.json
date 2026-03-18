@@ -1,0 +1,15 @@
+{
+  "name": "ivai-cva-tool",
+  "version": "1.1.0",
+  "description": "CVA Curation Tool — IVAI DPO Training Pair Workstation",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": ["ivai", "cva", "dpo", "axiology", "arlaf"],
+  "author": "Institute for Value-Generative AI (IVAI)",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "electron": "^29.0.0"
+  }
+}

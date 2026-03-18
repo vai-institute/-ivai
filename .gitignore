@@ -1,0 +1,4 @@
+﻿node_modules/
+session/progress.json
+config/api_keys.json
+output/
