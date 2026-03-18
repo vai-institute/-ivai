@@ -64,11 +64,22 @@ app.add_middleware(
 # Path configuration
 # ---------------------------------------------------------------------------
 
-# On Railway: /app is WORKDIR (set in Dockerfile); repo root is one level up
-BASE_DIR = Path(__file__).parent.parent
-CORPUS_DIR = BASE_DIR / "data" / "corpus"
-OUTPUT_DIR = BASE_DIR / "output"
-SESSION_DIR = BASE_DIR / "session"
+# On Railway: Dockerfile places data at /data/, session at /session/,
+# output at /output/ as absolute paths. Locally (development), fall back
+# to paths relative to the repo root so Claude Code testing works unchanged.
+_RAILWAY = Path("/data").exists() and Path("/data/corpus").exists()
+
+if _RAILWAY:
+    # Production: absolute paths set by Dockerfile RUN/COPY commands
+    CORPUS_DIR = Path("/data/corpus")
+    OUTPUT_DIR = Path("/output")
+    SESSION_DIR = Path("/session")
+else:
+    # Local development: relative to repo root (two levels up from api/main.py)
+    BASE_DIR = Path(__file__).parent.parent
+    CORPUS_DIR = BASE_DIR / "data" / "corpus"
+    OUTPUT_DIR = BASE_DIR / "output"
+    SESSION_DIR = BASE_DIR / "session"
 
 # Ensure writable directories exist on startup
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,6 @@ WORKDIR /app
 COPY api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY api/ .
-COPY data/ /app/../data/
-COPY session/ /app/../session/
-COPY output/ /app/../output/
+COPY data/ /data/
+RUN mkdir -p /session /output
 CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
