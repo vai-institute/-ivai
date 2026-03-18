@@ -641,6 +641,13 @@ Respond ONLY with valid JSON. No preamble, no markdown fences, no explanation ou
                 },
             )
             resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # Capture the full response body from Together AI for debugging
+        error_body = e.response.text if hasattr(e, 'response') else str(e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Together AI call failed: {e} | Body: {error_body}"
+        )
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Together AI call failed: {e}")
 
