@@ -8,7 +8,9 @@
       "Bash(node -e \"const { marked } = require\\(''marked''\\); console.log\\(''marked OK, version:'', require\\(''marked/package.json''\\).version\\);\")",
       "Bash(node -e \"try { const { marked } = require\\(''marked''\\); console.log\\(typeof marked.parse\\); } catch\\(e\\) { console.log\\(''ERROR:'', e.message\\); }\")",
       "Bash(node -e \"const p=JSON.parse\\(require\\(''''fs''''\\).readFileSync\\(''''/dev/stdin'''',''''utf8''''\\)\\); console.log\\(''''type:'''', p.type\\); console.log\\(''''main:'''', p.main\\); console.log\\(''''exports:'''', JSON.stringify\\(p.exports\\).substring\\(0,200\\)\\);\")",
-      "Bash(npx electron:*)"
+      "Bash(npx electron:*)",
+      "Bash(node -e \"console.log\\(''quill:'', require\\(''quill/package.json''\\).version\\); console.log\\(''turndown:'', require\\(''turndown/package.json''\\).version\\);\")",
+      "Bash(ls C:/projects/ivai-cva-tool/node_modules/marked/lib/marked.*)"
     ]
   }
 }

@@ -19,6 +19,8 @@
     "electron": "^29.0.0"
   },
   "dependencies": {
-    "marked": "^4.3.0"
+    "marked": "^4.3.0",
+    "quill": "^1.3.7",
+    "turndown": "^7.2.2"
   }
 }

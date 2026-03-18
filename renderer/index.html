@@ -24,6 +24,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CVA Curation Tool — IVAI</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet"
+        href="../node_modules/quill/dist/quill.snow.css" />
 </head>
 <body>
 
@@ -275,6 +277,10 @@
           <div class="panel-body" id="vai-panel-body">
             <div class="response-placeholder">Click ↺ to generate a response.</div>
           </div>
+          <!-- Quill WYSIWYG editor — shown when Edit mode is active -->
+          <div id="vai-quill-container" style="display:none;">
+            <div id="vai-quill-editor"></div>
+          </div>
           <div class="panel-footer" id="vai-panel-footer">
             <button class="pill-role" id="pill-vai-nonpref"
                     title="Mark as non-preferred">✕ Non-preferred</button>
@@ -506,6 +512,9 @@
     </div>
   </div>
 
+  <script src="../node_modules/quill/dist/quill.min.js"></script>
+  <script src="../node_modules/marked/marked.min.js"></script>
+  <script src="../node_modules/turndown/dist/turndown.js"></script>
   <script src="renderer.js"></script>
 
 </body>

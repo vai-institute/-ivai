@@ -98,6 +98,20 @@ let vaiWasEdited = false;
  */
 let cortexResult = null;
 
+/**
+ * Quill editor instance for VAI panel WYSIWYG editing.
+ * Initialized once on first Edit activation.
+ * @type {Quill|null}
+ */
+let quillEditor = null;
+
+/**
+ * turndown service instance for HTML → markdown conversion.
+ * Initialized once at startup.
+ * @type {TurndownService|null}
+ */
+let turndownService = null;
+
 // ─── DOM references ───────────────────────────────────────────────────────────
 // Resolved once on DOMContentLoaded; used throughout the module.
 
@@ -1110,6 +1124,76 @@ async function initApiKeys() {
 }
 
 /**
+ * Initializes the turndown HTML-to-markdown converter.
+ * Configured to match the constrained Quill toolbar format set:
+ * bold, italic, ordered list, bullet list, paragraph only.
+ * Called once at startup.
+ *
+ * @returns {void}
+ */
+function initTurndown() {
+  if (typeof TurndownService === 'undefined') {
+    console.warn('[turndown] TurndownService not available.');
+    return;
+  }
+  turndownService = new TurndownService({
+    headingStyle:   'atx',
+    bulletListMarker: '-',
+    strongDelimiter: '**',
+    emDelimiter:    '_'
+  });
+  console.log('[turndown] Initialized.');
+}
+
+/**
+ * Initializes the Quill WYSIWYG editor with a constrained toolbar.
+ * Allowed formats: bold, italic, ordered list, bullet list only.
+ * Called on first Edit activation — lazy initialization.
+ *
+ * The toolbar maps directly to meaningful DPO training data formats:
+ *   Bold    → **emphasis** on key person-centered phrases
+ *   Italic  → _subtle emphasis_ or titles
+ *   Bullet  → unordered list for multiple considerations
+ *   Ordered → numbered steps when sequence matters
+ *
+ * No headers, no links, no color, no font size — WLYSIWLYCD.
+ *
+ * @returns {Quill|null} The initialized Quill instance, or null on failure
+ */
+function initQuillEditor() {
+  if (typeof Quill === 'undefined') {
+    console.warn('[quill] Quill not available.');
+    return null;
+  }
+  if (quillEditor) return quillEditor; // already initialized
+
+  quillEditor = new Quill('#vai-quill-editor', {
+    theme: 'snow',
+    modules: {
+      toolbar: [
+        ['bold', 'italic'],
+        [{ 'list': 'ordered' }, { 'list': 'bullet' }],
+        ['clean']
+      ]
+    },
+    formats: ['bold', 'italic', 'list'], // whitelist — all others stripped
+    placeholder: 'Edit the VAI response here…'
+  });
+
+  // Track edits — any change marks response as edited
+  quillEditor.on('text-change', function() {
+    if (!vaiWasEdited) {
+      vaiWasEdited = true;
+      cortexResult = null;
+      updateWritePairEnabled();
+    }
+  });
+
+  console.log('[quill] Editor initialized.');
+  return quillEditor;
+}
+
+/**
  * Returns the appropriate API key for a given model ID.
  * Infers provider from model ID prefix.
  *
@@ -1231,6 +1315,16 @@ async function generateVai(slotId) {
   cortexResult = null;
   var cortexPopup = document.getElementById('cortex-popup');
   if (cortexPopup) cortexPopup.remove();
+
+  // Regen clears Preferred selection — response is new
+  if (preferredSlotId === 'vai-0') {
+    preferredSlotId = null;
+    var prefPill = document.getElementById('pill-vai-pref');
+    if (prefPill) prefPill.classList.remove('active-pref');
+    var editor = document.getElementById('preferred-editor');
+    if (editor) editor.value = '';
+    updateWritePairEnabled();
+  }
 
   var currentCase = corpus[currentIndex];
   if (!currentCase) return;
@@ -1474,6 +1568,11 @@ function showValidationHint(message) {
  * @returns {void}
  */
 function onPreferredSelected(slotId) {
+  // Mutual exclusivity — exit Edit mode if active
+  if (vaiEditMode) {
+    exitVaiEditMode();
+  }
+
   // If this slot is already preferred, clicking again deselects it
   if (preferredSlotId === slotId) {
     preferredSlotId = null;
@@ -1607,32 +1706,64 @@ function initRolePills() {
  * @returns {void}
  */
 function enterVaiEditMode() {
-  var body    = document.getElementById('vai-panel-body');
-  var editBtn = document.getElementById('pill-vai-edit');
-  if (!body) return;
+  // Mutual exclusivity — clear Preferred if active
+  if (preferredSlotId === 'vai-0') {
+    preferredSlotId = null;
+    var prefPill = document.getElementById('pill-vai-pref');
+    if (prefPill) prefPill.classList.remove('active-pref');
+    var editor = document.getElementById('preferred-editor');
+    if (editor) editor.value = '';
+    updateWritePairEnabled();
+  }
 
-  var textEl = body.querySelector('.response-text');
-  if (!textEl) return;
+  var body          = document.getElementById('vai-panel-body');
+  var quillContainer = document.getElementById('vai-quill-container');
+  var editBtn       = document.getElementById('pill-vai-edit');
 
-  // Make editable
-  textEl.contentEditable = 'true';
-  textEl.focus();
+  if (!body || !quillContainer) return;
 
-  // Visual indicators
-  body.classList.add('edit-mode');
+  // Initialize Quill on first use
+  var qe = initQuillEditor();
+  if (!qe) return;
+
+  // Get current response text from slotState (markdown)
+  var currentText = getSlotText('vai-0');
+
+  // Convert markdown to HTML for Quill display.
+  // marked.parse() is available via window.electronAPI.renderMarkdown
+  // which uses marked v4 (synchronous in this context).
+  // We use the global marked object loaded via script tag instead
+  // for synchronous access inside the editor init.
+  var html = '';
+  try {
+    // marked is loaded as a global via node_modules script tag
+    if (typeof marked !== 'undefined') {
+      html = marked.parse(currentText);
+    } else {
+      // Fallback: wrap plain text in a paragraph
+      html = '<p>' + currentText.replace(/\n\n/g, '</p><p>') + '</p>';
+    }
+  } catch(e) {
+    html = '<p>' + currentText + '</p>';
+  }
+
+  // Load HTML into Quill — renders formatted content immediately
+  qe.clipboard.dangerouslyPasteHTML(html);
+
+  // Hide rendered panel body, show Quill container
+  body.style.display          = 'none';
+  quillContainer.style.display = 'flex';
+  quillContainer.style.flexDirection = 'column';
+  quillContainer.style.flex   = '1';
+  quillContainer.style.minHeight = '0';
+
+  // Visual indicator
   if (editBtn) editBtn.classList.add('active-edit');
 
   vaiEditMode = true;
 
-  // Track edits — any keystroke marks response as edited
-  textEl.addEventListener('input', function onEdit() {
-    if (!vaiWasEdited) {
-      vaiWasEdited  = true;
-      cortexResult  = null; // Invalidate previous validation
-      // Block Write Pair until re-validated
-      updateWritePairEnabled();
-    }
-  }, { once: false });
+  // Focus the editor
+  setTimeout(function() { qe.focus(); }, 50);
 }
 
 /**
@@ -1642,15 +1773,15 @@ function enterVaiEditMode() {
  * @returns {void}
  */
 function exitVaiEditMode() {
-  var body    = document.getElementById('vai-panel-body');
-  var editBtn = document.getElementById('pill-vai-edit');
-  if (body) {
-    var textEl = body.querySelector('.response-text');
-    if (textEl) textEl.contentEditable = 'false';
-    body.classList.remove('edit-mode');
-  }
-  if (editBtn) editBtn.classList.remove('active-edit');
-  vaiEditMode  = false;
+  var body           = document.getElementById('vai-panel-body');
+  var quillContainer = document.getElementById('vai-quill-container');
+  var editBtn        = document.getElementById('pill-vai-edit');
+
+  if (body)           body.style.display           = '';
+  if (quillContainer) quillContainer.style.display = 'none';
+  if (editBtn)        editBtn.classList.remove('active-edit');
+
+  vaiEditMode = false;
 }
 
 /**
@@ -1662,10 +1793,18 @@ function exitVaiEditMode() {
  * @returns {string} Current VAI panel text
  */
 function getVaiPanelText() {
-  if (vaiEditMode) {
-    var body   = document.getElementById('vai-panel-body');
-    var textEl = body ? body.querySelector('.response-text') : null;
-    if (textEl) return textEl.innerText || textEl.textContent || '';
+  if (quillEditor) {
+    // Get HTML from Quill and convert to markdown
+    var html = quillEditor.root.innerHTML;
+    // Empty editor check
+    if (html === '<p><br></p>' || html === '<p></p>') {
+      return getSlotText('vai-0');
+    }
+    if (turndownService) {
+      return turndownService.turndown(html);
+    }
+    // Fallback: return plain text if turndown unavailable
+    return quillEditor.getText().trim();
   }
   return getSlotText('vai-0');
 }
@@ -1679,6 +1818,38 @@ function getVaiPanelText() {
  * @returns {Promise<void>}
  */
 async function runCortexValidation() {
+  // Capture edited text BEFORE exiting edit mode —
+  // getVaiPanelText() reads from Quill which is only
+  // available while edit mode is active.
+  var editedText = vaiEditMode ? getVaiPanelText() : null;
+
+  // Test puts panel in neutral review state —
+  // clear Edit mode and Preferred selection first
+  if (vaiEditMode) {
+    // Update slotState with edited content before exiting
+    // so getVaiPanelText() returns correct text after exit
+    if (editedText) {
+      var state = slotState.get('vai-0');
+      if (state) state.fullText = editedText;
+
+      // Re-render the panel body with the edited markdown
+      var body = document.getElementById('vai-panel-body');
+      if (body && typeof marked !== 'undefined') {
+        body.innerHTML = '<div class="response-text markdown-body">' +
+                         marked.parse(editedText) +
+                         '</div>';
+      }
+    }
+    exitVaiEditMode();
+  }
+
+  if (preferredSlotId === 'vai-0') {
+    preferredSlotId = null;
+    var prefPill = document.getElementById('pill-vai-pref');
+    if (prefPill) prefPill.classList.remove('active-pref');
+    updateWritePairEnabled();
+  }
+
   var testBtn  = document.getElementById('pill-vai-test');
   var text     = getVaiPanelText();
   var currentCase = corpus[currentIndex];
@@ -1877,6 +2048,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initSettingsModal();
 
     // Step 6: Init API keys and stream listeners
+    initTurndown();
     await initApiKeys();
     initStreamListeners();
     initRegenButtons();
