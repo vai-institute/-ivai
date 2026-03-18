@@ -63,6 +63,41 @@ let apiKeys = { together_ai: '', openai: '', anthropic: '' };
  */
 const slotState = new Map();
 
+/**
+ * Tracks which slot holds the preferred response.
+ * null = none selected. Value is slotId e.g. 'vai-0'.
+ * @type {string|null}
+ */
+let preferredSlotId = null;
+
+/**
+ * Tracks which slot holds the non-preferred response.
+ * null = none selected. Value is slotId e.g. 'std-0'.
+ * @type {string|null}
+ */
+let nonPreferredSlotId = null;
+
+/**
+ * Whether the VAI panel body is currently in edit mode.
+ * Set to true when CVA clicks Edit. Cleared on navigation or regen.
+ * @type {boolean}
+ */
+let vaiEditMode = false;
+
+/**
+ * Whether the current VAI response was edited by the CVA.
+ * Forces Cortex validation before Write Pair is enabled.
+ * @type {boolean}
+ */
+let vaiWasEdited = false;
+
+/**
+ * Last Cortex validation result for the current VAI response.
+ * null = not yet run. Reset on navigation, regen, or new edit.
+ * @type {Object|null}
+ */
+let cortexResult = null;
+
 // ─── DOM references ───────────────────────────────────────────────────────────
 // Resolved once on DOMContentLoaded; used throughout the module.
 
@@ -299,6 +334,16 @@ async function openSettingsModal() {
     document.getElementById('key-together').value  = keys.together_ai;
     document.getElementById('key-openai').value    = keys.openai;
     document.getElementById('key-anthropic').value = keys.anthropic;
+
+    // Populate Cortex selectors from stored config
+    var cortexEndpointSelect = document.getElementById('cortex-endpoint-select');
+    var cortexModelSelect    = document.getElementById('cortex-model-select');
+    if (cortexEndpointSelect && keys.cortex_endpoint) {
+      cortexEndpointSelect.value = keys.cortex_endpoint;
+    }
+    if (cortexModelSelect && keys.cortex_model) {
+      cortexModelSelect.value = keys.cortex_model;
+    }
   } catch (err) {
     console.warn('[settings] Could not read API keys:', err.message);
   }
@@ -331,10 +376,20 @@ async function saveApiKeys() {
   var statusEl = document.getElementById('settings-save-status');
   var saveBtn  = document.getElementById('btn-settings-save');
 
+  var cortexEndpointSelect = document.getElementById('cortex-endpoint-select');
+  var cortexModelSelect    = document.getElementById('cortex-model-select');
+  var cortexEndpoint = cortexEndpointSelect
+                     ? cortexEndpointSelect.value : 'railway';
+  var cortexModel    = cortexModelSelect
+                     ? cortexModelSelect.value
+                     : 'mistralai/Mistral-7B-Instruct-v0.2';
+
   var keys = {
-    together_ai: document.getElementById('key-together').value.trim(),
-    openai:      document.getElementById('key-openai').value.trim(),
-    anthropic:   document.getElementById('key-anthropic').value.trim()
+    together_ai:     document.getElementById('key-together').value.trim(),
+    openai:          document.getElementById('key-openai').value.trim(),
+    anthropic:       document.getElementById('key-anthropic').value.trim(),
+    cortex_endpoint: cortexEndpoint,
+    cortex_model:    cortexModel
   };
 
   if (saveBtn) saveBtn.disabled = true;
@@ -342,7 +397,10 @@ async function saveApiKeys() {
   try {
     var result = await window.electronAPI.writeApiKeys(keys);
     if (result.ok) {
-      statusEl.textContent = '✓ Keys saved to config/api_keys.json';
+      // Update apiKeys in memory after save
+      apiKeys.cortex_endpoint = cortexEndpoint;
+      apiKeys.cortex_model    = cortexModel;
+      statusEl.textContent = '✓ Settings saved to config/api_keys.json';
       statusEl.className = 'success';
       // Auto-close after brief confirmation
       setTimeout(closeSettingsModal, 1200);
@@ -772,6 +830,16 @@ function loadCase(caseNumber) {
   // Cancel any in-flight streams from the previous case before loading new one
   window.electronAPI.cancelStream();
 
+  // Reset role selections when navigating to a new case
+  clearRoleSelections();
+
+  // Reset VAI edit state on navigation
+  exitVaiEditMode();
+  vaiWasEdited = false;
+  cortexResult = null;
+  var cortexPopup = document.getElementById('cortex-popup');
+  if (cortexPopup) cortexPopup.remove();
+
   // Find the case in the corpus array
   var c = corpus.find(function(item) { return item.case_number === caseNumber; });
   if (!c) {
@@ -1157,6 +1225,13 @@ async function generateStandard(slotId) {
 async function generateVai(slotId) {
   slotId = slotId || 'vai-0';
 
+  // Reset edit state on regeneration
+  exitVaiEditMode();
+  vaiWasEdited = false;
+  cortexResult = null;
+  var cortexPopup = document.getElementById('cortex-popup');
+  if (cortexPopup) cortexPopup.remove();
+
   var currentCase = corpus[currentIndex];
   if (!currentCase) return;
 
@@ -1283,6 +1358,502 @@ function initRegenButtons() {
   }
 }
 
+// ─── Step 7: Role selection ───────────────────────────────────────────────────
+
+/**
+ * Clears all active role pill selections visually and resets
+ * role state variables. Called before applying a new selection
+ * to enforce mutual exclusivity across all panels and slots.
+ *
+ * @returns {void}
+ */
+function clearRoleSelections() {
+  // Remove active class from all role pills
+  document.querySelectorAll('.pill-role').forEach(function(pill) {
+    pill.classList.remove('active-pref', 'active-nonpref');
+  });
+  preferredSlotId    = null;
+  nonPreferredSlotId = null;
+
+  // Clear preferred editor and hint line
+  var editor   = document.getElementById('preferred-editor');
+  var hintLine = document.getElementById('hint-line');
+  if (editor)   editor.value = '';
+  if (hintLine) hintLine.textContent = '';
+
+  // Disable Write Pair — requires both roles assigned
+  updateWritePairEnabled();
+}
+
+/**
+ * Returns the current full text content of a panel slot.
+ * Reads from slotState if available (authoritative after stream),
+ * falling back to the panel body's textContent.
+ *
+ * @param {string} slotId - Slot identifier ('std-0' or 'vai-0')
+ * @returns {string} Full response text, or empty string if not generated
+ */
+function getSlotText(slotId) {
+  var state = slotState.get(slotId);
+  if (state && state.fullText) return state.fullText;
+
+  // Fallback: read from DOM (handles edge cases where slotState is stale)
+  var bodyId = slotId.startsWith('std') ? 'std-panel-body' : 'vai-panel-body';
+  var body   = document.getElementById(bodyId);
+  if (!body) return '';
+  var textEl = body.querySelector('.response-text');
+  return textEl ? textEl.textContent : '';
+}
+
+/**
+ * Enables or disables the Write Pair button based on whether
+ * both a preferred and non-preferred slot have been assigned.
+ * Also requires a confidence chip to be selected (Step 9 fully
+ * implements validation — this is the role-selection gate only).
+ *
+ * @returns {void}
+ */
+function updateWritePairEnabled() {
+  var btn = document.getElementById('btn-write-pair');
+  if (!btn) return;
+
+  var bothAssigned = preferredSlotId    !== null &&
+                     nonPreferredSlotId !== null &&
+                     preferredSlotId    !== nonPreferredSlotId;
+
+  if (!bothAssigned) {
+    btn.disabled = true;
+    return;
+  }
+
+  // If VAI was edited, require validation before enabling Write Pair
+  if (vaiWasEdited && cortexResult === null) {
+    btn.disabled = true;
+    showValidationHint('Edited response requires VAI validation. Click ⟳ Test to proceed.');
+    return;
+  }
+
+  // If Cortex found issues, require override explanation (Step 9 wires this fully)
+  if (vaiWasEdited && cortexResult && cortexResult.has_issues) {
+    var overrideEl = document.getElementById('override-explanation');
+    var hasExplanation = overrideEl &&
+                         overrideEl.value &&
+                         overrideEl.value.trim().length > 10;
+    if (!hasExplanation) {
+      btn.disabled = true;
+      return;
+    }
+  }
+
+  btn.disabled = false;
+  showValidationHint('');
+}
+
+/**
+ * Shows a validation hint message above the Write Pair button.
+ * @param {string} message - Hint text. Empty string clears the hint.
+ * @returns {void}
+ */
+function showValidationHint(message) {
+  var el = document.getElementById('validation-error');
+  if (el) el.textContent = message;
+}
+
+/**
+ * Handles selection of a response slot as Preferred.
+ * - Clears any existing role selections
+ * - Marks the pill active
+ * - Copies the slot's text into the preferred-editor textarea
+ * - Sets the Pause-and-Ask hint if the flag is active
+ * - Updates Write Pair enabled state
+ *
+ * Only VAI slots can be marked Preferred (Standard is non-preferred only).
+ * This is enforced by only wiring this handler to VAI pills.
+ *
+ * @param {string} slotId - The slot being marked as preferred ('vai-0')
+ * @returns {void}
+ */
+function onPreferredSelected(slotId) {
+  // If this slot is already preferred, clicking again deselects it
+  if (preferredSlotId === slotId) {
+    preferredSlotId = null;
+    var pill = document.getElementById('pill-' +
+               (slotId.startsWith('vai') ? 'vai' : 'std') + '-pref');
+    if (pill) pill.classList.remove('active-pref');
+    var editor = document.getElementById('preferred-editor');
+    if (editor) editor.value = '';
+    updateWritePairEnabled();
+    return;
+  }
+
+  // Clear previous selections first
+  clearRoleSelections();
+
+  preferredSlotId = slotId;
+
+  // Mark the correct pill active
+  var pillId = slotId.startsWith('vai') ? 'pill-vai-pref' : 'pill-std-pref';
+  var pill   = document.getElementById(pillId);
+  if (pill) pill.classList.add('active-pref');
+
+  // Copy slot text into preferred editor
+  var text   = getSlotText(slotId);
+  var editor = document.getElementById('preferred-editor');
+  if (editor) editor.value = text;
+
+  // Set Pause-and-Ask hint if flag is active
+  var pnaCheckbox = document.getElementById('flag-pna');
+  var hintLine    = document.getElementById('hint-line');
+  if (hintLine) {
+    hintLine.textContent = (pnaCheckbox && pnaCheckbox.checked)
+      ? 'P&A active — preferred response must pause and ask before proceeding.'
+      : '';
+  }
+
+  updateWritePairEnabled();
+}
+
+/**
+ * Handles selection of a response slot as Non-preferred.
+ * - If this slot is already non-preferred, deselects it
+ * - Otherwise clears existing selections and marks the slot
+ * - Updates Write Pair enabled state
+ *
+ * Both Standard and VAI slots can be marked Non-preferred.
+ *
+ * @param {string} slotId - The slot being marked as non-preferred
+ * @returns {void}
+ */
+function onNonPreferredSelected(slotId) {
+  // Toggle off if already selected
+  if (nonPreferredSlotId === slotId) {
+    nonPreferredSlotId = null;
+    var pillId = slotId.startsWith('std') ? 'pill-std-nonpref' : 'pill-vai-nonpref';
+    var pill   = document.getElementById(pillId);
+    if (pill) pill.classList.remove('active-nonpref');
+    updateWritePairEnabled();
+    return;
+  }
+
+  // Clear all first, then re-apply preferred if one was set
+  var savedPreferred = preferredSlotId;
+  clearRoleSelections();
+
+  // Restore preferred selection if it existed
+  if (savedPreferred) {
+    preferredSlotId = savedPreferred;
+    var prefPillId = savedPreferred.startsWith('vai')
+                   ? 'pill-vai-pref' : 'pill-std-pref';
+    var prefPill   = document.getElementById(prefPillId);
+    if (prefPill) prefPill.classList.add('active-pref');
+
+    // Restore preferred editor text
+    var editor = document.getElementById('preferred-editor');
+    if (editor) editor.value = getSlotText(savedPreferred);
+  }
+
+  nonPreferredSlotId = slotId;
+
+  var nonPrefPillId = slotId.startsWith('std') ? 'pill-std-nonpref' : 'pill-vai-nonpref';
+  var nonPrefPill   = document.getElementById(nonPrefPillId);
+  if (nonPrefPill) nonPrefPill.classList.add('active-nonpref');
+
+  updateWritePairEnabled();
+}
+
+/**
+ * Wires all role selection pills to their handlers.
+ * Standard panel: Non-preferred pill only.
+ * VAI panel: both Preferred and Non-preferred pills.
+ * Also resets role state when a new case loads (called from loadCase).
+ *
+ * @returns {void}
+ */
+function initRolePills() {
+  // Standard panel — non-preferred only
+  var pillStdNonpref = document.getElementById('pill-std-nonpref');
+  if (pillStdNonpref) {
+    pillStdNonpref.addEventListener('click', function() {
+      onNonPreferredSelected('std-0');
+    });
+  }
+
+  // VAI panel — non-preferred
+  var pillVaiNonpref = document.getElementById('pill-vai-nonpref');
+  if (pillVaiNonpref) {
+    pillVaiNonpref.addEventListener('click', function() {
+      onNonPreferredSelected('vai-0');
+    });
+  }
+
+  // VAI panel — preferred
+  var pillVaiPref = document.getElementById('pill-vai-pref');
+  if (pillVaiPref) {
+    pillVaiPref.addEventListener('click', function() {
+      onPreferredSelected('vai-0');
+    });
+  }
+}
+
+// ─── Step 7B: Edit, Test, and Cortex validation ──────────────────────────────
+
+/**
+ * Activates inline editing on the VAI panel body.
+ * Makes the response-text div contenteditable.
+ * Adds amber border to signal edit mode.
+ * Wires input event to set vaiWasEdited and clear cortexResult.
+ * Edit mode persists until navigation or regeneration.
+ *
+ * @returns {void}
+ */
+function enterVaiEditMode() {
+  var body    = document.getElementById('vai-panel-body');
+  var editBtn = document.getElementById('pill-vai-edit');
+  if (!body) return;
+
+  var textEl = body.querySelector('.response-text');
+  if (!textEl) return;
+
+  // Make editable
+  textEl.contentEditable = 'true';
+  textEl.focus();
+
+  // Visual indicators
+  body.classList.add('edit-mode');
+  if (editBtn) editBtn.classList.add('active-edit');
+
+  vaiEditMode = true;
+
+  // Track edits — any keystroke marks response as edited
+  textEl.addEventListener('input', function onEdit() {
+    if (!vaiWasEdited) {
+      vaiWasEdited  = true;
+      cortexResult  = null; // Invalidate previous validation
+      // Block Write Pair until re-validated
+      updateWritePairEnabled();
+    }
+  }, { once: false });
+}
+
+/**
+ * Exits VAI edit mode. Called on navigation or regeneration.
+ * Does NOT save or revert — content stays as edited.
+ *
+ * @returns {void}
+ */
+function exitVaiEditMode() {
+  var body    = document.getElementById('vai-panel-body');
+  var editBtn = document.getElementById('pill-vai-edit');
+  if (body) {
+    var textEl = body.querySelector('.response-text');
+    if (textEl) textEl.contentEditable = 'false';
+    body.classList.remove('edit-mode');
+  }
+  if (editBtn) editBtn.classList.remove('active-edit');
+  vaiEditMode  = false;
+}
+
+/**
+ * Returns the current text content of the VAI panel body.
+ * When in edit mode, reads from the contenteditable element
+ * (which may differ from slotState if the CVA has made edits).
+ * Falls back to slotState when not in edit mode.
+ *
+ * @returns {string} Current VAI panel text
+ */
+function getVaiPanelText() {
+  if (vaiEditMode) {
+    var body   = document.getElementById('vai-panel-body');
+    var textEl = body ? body.querySelector('.response-text') : null;
+    if (textEl) return textEl.innerText || textEl.textContent || '';
+  }
+  return getSlotText('vai-0');
+}
+
+/**
+ * Runs Cortex validation on the current VAI panel text.
+ * Calls the Railway /review endpoint via IPC.
+ * Stores result in cortexResult.
+ * Shows the result popup overlaid on the Standard panel.
+ *
+ * @returns {Promise<void>}
+ */
+async function runCortexValidation() {
+  var testBtn  = document.getElementById('pill-vai-test');
+  var text     = getVaiPanelText();
+  var currentCase = corpus[currentIndex];
+
+  if (!text || !currentCase) {
+    showCortexPopup({ error: 'No response text to validate.' });
+    return;
+  }
+
+  // Show loading state on Test button
+  if (testBtn) {
+    testBtn.disabled    = true;
+    testBtn.textContent = '⟳ Testing…';
+  }
+
+  try {
+    var raw = await window.electronAPI.runCortexReview({
+      text:     text,
+      caseData: currentCase
+    });
+
+    // Normalize API response shape to internal shape.
+    // API returns { clean, issues, suggestions, confidence, summary }
+    // Renderer uses { has_issues, flags, suggestions, confidence, summary }
+    var result = {
+      has_issues:  raw.clean === false,
+      flags:       raw.issues       || [],
+      suggestions: raw.suggestions  || [],
+      confidence:  raw.confidence   || 'Low',
+      summary:     raw.summary      || '',
+      error:       raw.error        || null
+    };
+
+    cortexResult = result;
+    updateWritePairEnabled();
+    showCortexPopup(result);
+
+  } catch (err) {
+    console.error('[cortex] Validation failed:', err.message);
+    showCortexPopup({ error: err.message });
+  } finally {
+    if (testBtn) {
+      testBtn.disabled    = false;
+      testBtn.textContent = '⟳ Test';
+    }
+  }
+}
+
+/**
+ * Displays the Cortex validation result as a popup overlaid
+ * on the Standard panel (left panel area).
+ * Shows clean result or issues list.
+ * If issues found and response was edited, shows override
+ * explanation field.
+ *
+ * @param {Object} result - Cortex analysis result from Railway API
+ * @returns {void}
+ */
+function showCortexPopup(result) {
+  // Remove existing popup if present
+  var existing = document.getElementById('cortex-popup');
+  if (existing) existing.remove();
+
+  // Build popup content
+  var contentHtml;
+
+  if (result.error) {
+    contentHtml = '<div class="cortex-error">⚠ ' + result.error + '</div>';
+
+  } else if (!result.has_issues) {
+    contentHtml = [
+      '<div class="cortex-clean">',
+      '  <span class="cortex-icon">✓</span>',
+      '  <strong>VAI validation passed</strong>',
+      '  <p>No value inversions detected in the preferred response.</p>',
+      '</div>'
+    ].join('');
+
+  } else {
+    // Issues found — show flags and optional override field
+    var flagsHtml = (result.flags || []).map(function(f) {
+      return '<li>' + f + '</li>';
+    }).join('');
+
+    var overrideHtml = vaiWasEdited ? [
+      '<div class="cortex-override">',
+      '  <div class="cortex-override-label">',
+      '    Override reason (required to write pair):',
+      '  </div>',
+      '  <textarea id="override-explanation" rows="3"',
+      '    placeholder="Explain why this response is acceptable despite the flags above…"',
+      '  ></textarea>',
+      '</div>'
+    ].join('') : '';
+
+    contentHtml = [
+      '<div class="cortex-issues">',
+      '  <span class="cortex-icon cortex-warn">⚠</span>',
+      '  <strong>VAI validation — issues found</strong>',
+      '  <ul>' + flagsHtml + '</ul>',
+      overrideHtml,
+      '</div>'
+    ].join('');
+  }
+
+  // Build popup element — positioned over Standard panel
+  var popup = document.createElement('div');
+  popup.id = 'cortex-popup';
+  popup.innerHTML = [
+    '<div class="cortex-popup-inner">',
+    '  <div class="cortex-popup-header">',
+    '    <span>VAI Cortex Analysis</span>',
+    '    <button id="btn-cortex-close" title="Close">✕</button>',
+    '  </div>',
+    '  <div class="cortex-popup-body">' + contentHtml + '</div>',
+    '</div>'
+  ].join('');
+
+  // Insert popup into the Standard panel body area
+  var stdPanel = document.getElementById('panel-standard');
+  if (stdPanel) {
+    stdPanel.style.position = 'relative';
+    stdPanel.appendChild(popup);
+  } else {
+    document.body.appendChild(popup);
+  }
+
+  // Wire close button
+  var closeBtn = document.getElementById('btn-cortex-close');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', function() {
+      popup.remove();
+    });
+  }
+
+  // Wire override textarea to updateWritePairEnabled on input
+  var overrideEl = document.getElementById('override-explanation');
+  if (overrideEl) {
+    overrideEl.addEventListener('input', function() {
+      updateWritePairEnabled();
+    });
+  }
+}
+
+/**
+ * Wires the Edit and Test pills in the VAI panel footer.
+ *
+ * Edit: toggles contenteditable on VAI panel body.
+ *   Once activated stays on until navigation or regen.
+ * Test: fires Cortex validation on current VAI panel text.
+ *   Available at any time.
+ *
+ * @returns {void}
+ */
+function initEditTestPills() {
+  var editBtn = document.getElementById('pill-vai-edit');
+  var testBtn = document.getElementById('pill-vai-test');
+
+  if (editBtn) {
+    editBtn.addEventListener('click', function() {
+      if (!vaiEditMode) {
+        enterVaiEditMode();
+      }
+      // Once in edit mode, clicking again has no effect —
+      // edit persists until navigation or regen
+    });
+  }
+
+  if (testBtn) {
+    testBtn.addEventListener('click', function() {
+      runCortexValidation();
+    });
+  }
+}
+
 // ─── Startup sequence ─────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1309,6 +1880,8 @@ document.addEventListener('DOMContentLoaded', function() {
     await initApiKeys();
     initStreamListeners();
     initRegenButtons();
+    initRolePills();
+    initEditTestPills();
 
     // Step 5: Case display and navigation
     initNavigation();

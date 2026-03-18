@@ -62,8 +62,8 @@ const AVAILABLE_MODELS = [
     trainingEligible: true
   },
   {
-    id: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
-    label: 'Mixtral 8x7B',
+    id: 'mistralai/Mistral-Small-24B-Instruct-2501',
+    label: 'Mistral Small 24B',
     provider: 'Together AI',
     trainingEligible: true
   },

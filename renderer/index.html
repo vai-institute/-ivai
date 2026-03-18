@@ -244,8 +244,6 @@
           <div class="panel-footer" id="std-panel-footer">
             <button class="pill-role" id="pill-std-nonpref"
                     title="Mark as non-preferred">✕ Non-preferred</button>
-            <button class="pill-role" id="pill-std-pref"
-                    title="Mark as preferred">✓ Preferred</button>
           </div>
         </div>
 
@@ -282,6 +280,10 @@
                     title="Mark as non-preferred">✕ Non-preferred</button>
             <button class="pill-role" id="pill-vai-pref"
                     title="Mark as preferred">✓ Preferred</button>
+            <button class="pill-role pill-edit" id="pill-vai-edit"
+                    title="Enable editing of VAI response">✎ Edit</button>
+            <button class="pill-role pill-test" id="pill-vai-test"
+                    title="Run Cortex validation on current response">⟳ Test</button>
           </div>
         </div>
 
@@ -402,11 +404,12 @@
   <div id="settings-modal">
     <div class="dialog-card settings-card">
       <div class="settings-header">
-        <h2>⚙ API Key Settings</h2>
+        <h2>⚙ Infrastructure Settings</h2>
         <button id="btn-settings-close" title="Close">✕</button>
       </div>
       <p class="settings-subhead">
-        Keys are stored locally in <code>config/api_keys.json</code>.
+        API keys and Cortex configuration. Stored in
+        <code>config/api_keys.json</code>.
       </p>
 
       <div class="settings-fields">
@@ -448,6 +451,39 @@
         </div>
 
       </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-field">
+          <label class="settings-label">
+            <span class="settings-provider-name">Cortex Model</span>
+            <span class="settings-badge">validation engine</span>
+          </label>
+          <div class="settings-hint" style="margin-bottom:6px;">
+            Fixed for the session — all Test validations use this
+            model. Change only between sessions.
+          </div>
+          <div class="settings-input-row">
+            <select id="cortex-endpoint-select"
+                    style="width:120px;padding:5px 8px;font-size:12px;
+                           border:1px solid var(--border);border-radius:4px;
+                           background:var(--bg-secondary);">
+              <option value="railway">Railway (Mistral 7B)</option>
+              <option value="together">Together AI (direct)</option>
+            </select>
+            <select id="cortex-model-select"
+                    style="flex:1;padding:5px 8px;font-size:12px;
+                           border:1px solid var(--border);border-radius:4px;
+                           background:var(--bg-secondary);margin-left:6px;">
+              <option value="mistralai/Mistral-Small-24B-Instruct-2501">
+                Mistral Small 24B (serverless)
+              </option>
+              <option value="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8">
+                Llama 4 Maverick (serverless)
+              </option>
+            </select>
+          </div>
+        </div>
 
       <div id="settings-save-status"></div>
 

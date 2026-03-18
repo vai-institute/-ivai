@@ -631,7 +631,7 @@ Respond ONLY with valid JSON. No preamble, no markdown fences, no explanation ou
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "mistralai/Mistral-7B-Instruct-v0.2",  # Cortex model
+                    "model": "mistralai/Mistral-Small-24B-Instruct-2501",  # Cortex model — serverless
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_message},

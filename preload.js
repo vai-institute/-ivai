@@ -125,6 +125,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelStream: (slotId) => ipcRenderer.invoke('cancel-stream', slotId),
 
   /**
+   * Sends VAI response text to Railway Cortex for validation.
+   * @param {Object} params - { text, caseData }
+   * @returns {Promise<{has_issues: boolean, flags: string[],
+   *           suggestions: string[], error?: string}>}
+   */
+  runCortexReview: (params) => ipcRenderer.invoke('cortex:review', params),
+
+  /**
    * Registers a callback for incoming stream token chunks.
    * Returns an unsubscribe function — call it on navigation to avoid leaks.
    * @param {function({slotId: string, content: string}): void} callback

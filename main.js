@@ -606,6 +606,45 @@ ipcMain.handle('cancel-stream', (_event, slotId) => {
   }
 });
 
+/**
+ * IPC handler: cortex:review
+ * @description Sends the VAI response text to the Railway /review
+ *   endpoint for Cortex validation. Returns structured analysis.
+ *   Uses the cortex_model from api_keys.json config.
+ *
+ * @param {Electron.IpcMainInvokeEvent} _event
+ * @param {Object} params
+ * @param {string} params.text     - VAI response text to validate
+ * @param {Object} params.caseData - Corpus case metadata
+ * @returns {Promise<{has_issues: boolean, flags: string[],
+ *           suggestions: string[], error?: string}>}
+ */
+ipcMain.handle('cortex:review', async (_event, params) => {
+  try {
+    const response = await fetch(`${API_BASE}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt:         params.caseData.prompt        || '',
+        response:       params.text                   || '',
+        inversion_type: params.caseData.inversion_type || '',
+        intensity:      params.caseData.appropriate_intensity || 'Balanced'
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Cortex review failed: ${response.status} ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    return result;
+
+  } catch (err) {
+    console.error('[cortex:review]', err.message);
+    return { has_issues: false, flags: [], error: err.message };
+  }
+});
+
 // ── Markdown rendering ────────────────────────────────────────────────────────
 
 /**
@@ -636,15 +675,23 @@ const API_KEYS_PATH = path.join(__dirname, 'config', 'api_keys.json');
  * @returns {{ together_ai: string, openai: string, anthropic: string }}
  */
 ipcMain.handle('config:read-keys', (_event) => {
-  const defaults = { together_ai: '', openai: '', anthropic: '' };
+  const defaults = {
+    together_ai:      '',
+    openai:           '',
+    anthropic:        '',
+    cortex_endpoint:  'railway',
+    cortex_model:     'mistralai/Mistral-Small-24B-Instruct-2501'
+  };
   try {
     if (!fs.existsSync(API_KEYS_PATH)) return defaults;
     const raw  = fs.readFileSync(API_KEYS_PATH, 'utf8');
     const data = JSON.parse(raw);
     return {
-      together_ai: data.together_ai || '',
-      openai:      data.openai      || '',
-      anthropic:   data.anthropic   || ''
+      together_ai:     data.together_ai     || '',
+      openai:          data.openai          || '',
+      anthropic:       data.anthropic       || '',
+      cortex_endpoint: data.cortex_endpoint || 'railway',
+      cortex_model:    data.cortex_model    || 'mistralai/Mistral-Small-24B-Instruct-2501'
     };
   } catch (err) {
     console.warn('[config] Could not read api_keys.json:', err.message);
@@ -663,10 +710,12 @@ ipcMain.handle('config:read-keys', (_event) => {
 ipcMain.handle('config:write-keys', (_event, keys) => {
   try {
     const data = {
-      _comment:   'CVA Tool API key configuration. Edit here or via the gear icon in the topbar.',
-      together_ai: keys.together_ai || '',
-      openai:      keys.openai      || '',
-      anthropic:   keys.anthropic   || ''
+      _comment:        'CVA Tool API key configuration. Edit here or via the gear icon in the topbar.',
+      together_ai:     keys.together_ai     || '',
+      openai:          keys.openai          || '',
+      anthropic:       keys.anthropic       || '',
+      cortex_endpoint: keys.cortex_endpoint || 'railway',
+      cortex_model:    keys.cortex_model    || 'mistralai/Mistral-Small-24B-Instruct-2501'
     };
     fs.writeFileSync(API_KEYS_PATH, JSON.stringify(data, null, 2), 'utf8');
     console.log('[config] API keys saved.');
