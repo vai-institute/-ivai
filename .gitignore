@@ -4,3 +4,7 @@ config/api_keys.json
 output/
 
 scripts/__pycache__/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
