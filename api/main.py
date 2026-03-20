@@ -141,14 +141,33 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 def _load_users() -> dict[str, dict]:
-    """Load users.json. Returns empty dict if file missing."""
+    """
+    Load users.json and return a flat dict keyed by user_id.
+
+    Resolves each user's role to its full capabilities list so the
+    rest of the API can do simple capability lookups without knowing
+    the role/user separation in the source file.
+    """
     if not USERS_FILE.exists():
         return {}
     with open(USERS_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-    # users.json is a dict keyed by user_id
-    return data if isinstance(data, dict) else {}
 
+    roles = data.get("roles", {})
+    users_list = data.get("users", [])
+
+    result = {}
+    for user in users_list:
+        user_id = user.get("user_id")
+        role = user.get("role", "")
+        role_def = roles.get(role, {})
+        result[user_id] = {
+            "user_id": user_id,
+            "display_name": user.get("display_name", ""),
+            "role": role,
+            "capabilities": role_def.get("capabilities", []),
+        }
+    return result
 
 def _get_user(user_id: str) -> dict:
     """
