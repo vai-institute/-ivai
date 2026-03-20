@@ -144,18 +144,19 @@ let turndownService = null;
  */
 async function loadCorpus() {
   try {
-    var result = await window.electronAPI.loadCorpus();
-    if (!result.success) {
-      console.error('[corpus] Load failed:', result.error);
-      return;
-    }
-    corpus = result.cases;
-    console.log('[renderer] Loaded ' + corpus.length.toLocaleString() +
-                ' cases from Railway API.');
-    populateVerticalFilter();
-  } catch (err) {
-    console.error('[renderer] Corpus load failed:', err.message);
-  }
+var result = await window.electronAPI.queueNext(
+  CURRENT_USER_ID,
+  activeVertical      || 'all',
+  activeInversionType || 'all'
+);
+if (result.success && result.case && result.case.case_number) {
+  loadCase(result.case.case_number);
+} else if (result.success && !result.case) {
+  console.warn('[nav] Queue exhausted — no more unworked cases.');
+  btnNext.textContent = 'Queue empty';
+  btnNext.disabled = true;
+} else {
+  console.warn('[nav] queue:next returned no case:', result.error);
 }
 
 /**
@@ -2034,12 +2035,14 @@ document.addEventListener('DOMContentLoaded', function() {
   panelStandard = document.getElementById('panel-standard');
   panelVai     = document.getElementById('panel-vai');
 
-  // Step 2: Load corpus
-  loadCorpus().then(function() {
-    // Step 3: Init session (reads progress.json, shows resume dialog if needed)
-    return initSession();
-  }).then(async function() {
-    // Step 4: Apply layout and wire interactions
+// Step 2: Load corpus
+loadCorpus().then(async function() {
+  // Register active user with main process before any authenticated API calls
+  await window.electronAPI.setActiveUser(CURRENT_USER_ID);
+  // Step 3: Init session
+  return initSession();
+}).then(async function() {
+  // Step 4: Apply layout and wire interactions
     initLayoutPresets();
     initDragHandles();
     initModeChips();
