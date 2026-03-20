@@ -756,7 +756,7 @@ ipcMain.handle('generate-standard', async (event, params) => {
     systemPrompt: variant.text,
     userPrompt: prompt,
     temperature: TEMP_STANDARD,
-    maxTokens: 600
+    maxTokens: 300
   });
 });
 
