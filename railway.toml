@@ -1,8 +1,8 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install -r api/requirements.txt && python -m spacy download en_core_web_lg"
+buildCommand = "pwd && ls -la && ls -la api/ && pip install -r api/requirements.txt && python -m spacy download en_core_web_lg"
 
 [deploy]
-startCommand = "sh -c 'cd /app/api && uvicorn main:app --host 0.0.0.0 --port $PORT'"
+startCommand = "sh -c 'find / -name main.py 2>/dev/null | head -5 && sleep 30'"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
