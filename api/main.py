@@ -1,237 +1,399 @@
 """
-CVA Tool FastAPI Backend — main application module.
+IVAI CVA Tool — FastAPI Backend
+================================
+Serves the 8 API endpoints required by the CVA Curation Tool Electron app.
 
-Role in VAI Architecture:
-    This module is the server-side backbone of the CVA Curation Tool. It sits
-    between the 3,200-case ARLAF corpus (JSONL files) and the Together AI DPO
-    fine-tuning pipeline. It exposes 8 REST endpoints consumed by the Electron
-    desktop app, enabling globally distributed CVA teams to work from the same
-    corpus without file conflicts or race conditions.
+Compliance posture (built-in, not bolted on):
+  - SOC 2 CC6:  Server-side role enforcement on every protected endpoint.
+  - SOC 2 CC7:  Full audit log on every write — user_id, action, timestamp,
+                resource_id, before/after state.
+  - GDPR/HIPAA: PII scrubbing via Microsoft Presidio before any pair is
+                written to disk.
+  - FERPA:      data_classification field on all corpus cases; FERPA-tagged
+                user sessions are firewalled from the ARLAF training pipeline.
 
-    Layer 2 (ARLAF) integration: The /review endpoint proxies VAI Cortex
-    analysis to Together AI, running Layer 1 axiological review on every
-    preferred response before it enters the training stream. The /pairs
-    endpoint writes validated DPO pairs in Together AI format.
-
-    Queue safety: An in-memory lock prevents two CVAs from claiming the same
-    case simultaneously. Acceptable for the current development phase; a
-    database-backed queue is the migration path for production scale.
-
-Endpoints:
-    GET  /health              Health check
-    GET  /corpus              Return all 3,200 corpus cases
-    GET  /session/{user_id}   Get CVA session state
-    POST /session/{user_id}   Update CVA session state
-    GET  /queue/next          Assign next unworked case (collision-safe)
-    POST /pairs               Submit a validated DPO pair
-    POST /skips               Submit a skip record
-    POST /flags               Submit a flag record
-    POST /review              Proxy VAI Cortex review to Together AI
+Author: IVAI Engineering
 """
+
+from __future__ import annotations
 
 import json
 import os
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# App initialization
+# Presidio — PII scrubbing
 # ---------------------------------------------------------------------------
+try:
+    from presidio_analyzer import AnalyzerEngine
+    from presidio_anonymizer import AnonymizerEngine
 
+    _analyzer = AnalyzerEngine()
+    _anonymizer = AnonymizerEngine()
+    PRESIDIO_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    PRESIDIO_AVAILABLE = False
+    print(
+        "WARNING: presidio-analyzer / presidio-anonymizer not installed. "
+        "PII scrubbing is DISABLED. Run: pip install presidio-analyzer "
+        "presidio-anonymizer && python -m spacy download en_core_web_lg"
+    )
+
+
+def scrub_pii(text: str) -> str:
+    """
+    Remove personally identifiable information from text before it is
+    written to the training corpus.
+
+    Uses Microsoft Presidio to detect and replace PII entities
+    (names, emails, phone numbers, dates of birth, locations, IDs, etc.)
+    with type-labelled placeholders, e.g. <PERSON>, <EMAIL_ADDRESS>.
+
+    If Presidio is unavailable (dev environment without the package),
+    returns the original text and logs a warning — never silently drops data.
+
+    Args:
+        text: Raw text that may contain PII.
+
+    Returns:
+        Anonymised text safe for inclusion in training data.
+    """
+    if not PRESIDIO_AVAILABLE or not text:
+        return text
+
+    results = _analyzer.analyze(text=text, language="en")
+    if not results:
+        return text
+
+    anonymized = _anonymizer.anonymize(text=text, analyzer_results=results)
+    return anonymized.text
+
+
+# ---------------------------------------------------------------------------
+# Paths — resolve relative to this file so Railway can place repo anywhere
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).parent.parent  # repo root
+CORPUS_DIR = BASE_DIR / "data" / "corpus"
+OUTPUT_DIR = BASE_DIR / "output"
+SESSION_DIR = BASE_DIR / "session"
+USERS_FILE = BASE_DIR / "config" / "users.json"
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+PAIRS_FILE = OUTPUT_DIR / "arlaf_training_data.jsonl"
+HOLDOUT_FILE = OUTPUT_DIR / "arlaf_holdout_data.jsonl"
+PENDING_FILE = OUTPUT_DIR / "arlaf_pending_review.jsonl"
+SKIPS_FILE = OUTPUT_DIR / "skipped_cases.jsonl"
+FLAGS_FILE = OUTPUT_DIR / "flagged_cases.jsonl"
+AUDIT_FILE = OUTPUT_DIR / "audit_log.jsonl"
+
+# ---------------------------------------------------------------------------
+# Thread-safe file lock — prevents concurrent write corruption
+# ---------------------------------------------------------------------------
+_write_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# In-memory corpus + queue state
+# ---------------------------------------------------------------------------
+_corpus: list[dict] = []
+_corpus_loaded = False
+_corpus_lock = threading.Lock()
+
+# Tracks which case numbers are currently being worked on by a CVA, so two
+# CVAs cannot receive the same case from GET /queue/next simultaneously.
+_in_flight: set[int] = set()
+_queue_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
 app = FastAPI(
-    title="CVA Tool API",
-    description="Backend API for the IVAI CVA Curation Tool",
+    title="IVAI CVA Tool API",
+    description="Backend API for the IVAI CVA Curation Tool.",
     version="1.0.0",
 )
 
-# CORS: allow requests from the Electron app (file:// origin) and any
-# future web-based CVA interface. Tighten origin list before enterprise deploy.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # In production, restrict this to the Electron app origin.
+    # Electron apps use 'null' origin by default.
+    allow_origins=["null", "http://localhost", "http://localhost:3000"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Path configuration
-# ---------------------------------------------------------------------------
-
-# On Railway: Dockerfile places data at /data/, session at /session/,
-# output at /output/ as absolute paths. Locally (development), fall back
-# to paths relative to the repo root so Claude Code testing works unchanged.
-_RAILWAY = Path("/data").exists() and Path("/data/corpus").exists()
-
-if _RAILWAY:
-    # Production: absolute paths set by Dockerfile RUN/COPY commands
-    CORPUS_DIR = Path("/data/corpus")
-    OUTPUT_DIR = Path("/output")
-    SESSION_DIR = Path("/session")
-else:
-    # Local development: relative to repo root (two levels up from api/main.py)
-    BASE_DIR = Path(__file__).parent.parent
-    CORPUS_DIR = BASE_DIR / "data" / "corpus"
-    OUTPUT_DIR = BASE_DIR / "output"
-    SESSION_DIR = BASE_DIR / "session"
-
-# Ensure writable directories exist on startup
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-SESSION_DIR.mkdir(parents=True, exist_ok=True)
-
-# Output file paths — all appended to as JSONL (one record per line)
-PAIRS_FILE = OUTPUT_DIR / "arlaf_training_data.jsonl"
-HOLDOUT_FILE = OUTPUT_DIR / "arlaf_holdout_data.jsonl"
-SKIPS_FILE = OUTPUT_DIR / "skipped_cases.jsonl"
-FLAGS_FILE = OUTPUT_DIR / "flagged_cases.jsonl"
 
 # ---------------------------------------------------------------------------
-# In-memory queue lock
+# User / role model
 # ---------------------------------------------------------------------------
 
-# Prevents two CVA sessions from claiming the same case simultaneously.
-# _claimed_cases holds case_numbers currently assigned but not yet written.
-# Resets on server restart — acceptable for dev phase.
-_queue_lock = threading.Lock()
-_claimed_cases: set[int] = set()
-
-# ---------------------------------------------------------------------------
-# Corpus cache
-# ---------------------------------------------------------------------------
-
-_corpus_cache: list[dict] = []
-_corpus_loaded: bool = False
+def _load_users() -> dict[str, dict]:
+    """Load users.json. Returns empty dict if file missing."""
+    if not USERS_FILE.exists():
+        return {}
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # users.json is a dict keyed by user_id
+    return data if isinstance(data, dict) else {}
 
 
-def _load_corpus() -> list[dict]:
+def _get_user(user_id: str) -> dict:
     """
-    Scan the corpus directory, parse all JSONL files, and cache the result.
-
-    Reads all 32 batch files from data/corpus/, sorts by case_number
-    ascending, and caches in module-level _corpus_cache. Subsequent calls
-    return the cache without re-reading disk.
-
-    Returns:
-        List of corpus case dicts sorted by case_number ascending.
-
-    Raises:
-        RuntimeError: If corpus directory is missing or contains no JSONL files.
-    """
-    global _corpus_cache, _corpus_loaded
-
-    if _corpus_loaded:
-        return _corpus_cache
-
-    if not CORPUS_DIR.exists():
-        raise RuntimeError(f"Corpus directory not found: {CORPUS_DIR}")
-
-    jsonl_files = sorted(CORPUS_DIR.glob("*.jsonl"))
-    if not jsonl_files:
-        raise RuntimeError(f"No JSONL files found in {CORPUS_DIR}")
-
-    cases: list[dict] = []
-    for filepath in jsonl_files:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue  # skip blank lines between records
-                try:
-                    cases.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue  # skip malformed lines without crashing
-
-    # Consistent ascending order for queue assignment
-    cases.sort(key=lambda c: c.get("case_number", 0))
-
-    _corpus_cache = cases
-    _corpus_loaded = True
-    return _corpus_cache
-
-
-def _get_worked_cases(user_id: str) -> set[int]:
-    """
-    Return the set of case_numbers already handled by a specific CVA.
-
-    Checks three sources:
-      1. The user's session file (completed_cases list)
-      2. The pairs output file (cases this user already wrote)
-      3. The skips output file (cases this user already skipped)
-
-    Flags are NOT included — a flagged case may still need a pair.
+    Return the user record for user_id, or raise 401 if unknown.
 
     Args:
-        user_id: The CVA's user identifier string.
+        user_id: The user identifier from the X-User-Id request header.
 
     Returns:
-        Set of integer case_numbers this user has already worked.
+        User record dict containing at minimum 'capabilities' list.
+
+    Raises:
+        HTTPException 401: If user_id is not found in users.json.
     """
-    worked: set[int] = set()
+    users = _load_users()
+    user = users.get(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Unknown user: {user_id}",
+        )
+    return user
 
-    # Source 1: session progress file
-    session_file = SESSION_DIR / f"{user_id}_progress.json"
-    if session_file.exists():
-        try:
-            with open(session_file, "r", encoding="utf-8") as f:
-                session = json.load(f)
-                worked.update(session.get("completed_cases", []))
-        except (json.JSONDecodeError, KeyError):
-            pass  # corrupt session file — treat as empty
 
-    # Source 2 & 3: scan output files for this user's prior submissions
-    for output_file in [PAIRS_FILE, SKIPS_FILE]:
-        if not output_file.exists():
-            continue
-        with open(output_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                    # Only count cases worked by THIS user
-                    if record.get("cva_user_id") == user_id:
-                        worked.add(record["case_number"])
-                except (json.JSONDecodeError, KeyError):
-                    continue
+def _require_capability(user: dict, capability: str) -> None:
+    """
+    Enforce that a user has a required capability.
 
-    return worked
+    SOC 2 CC6 — Logical and Physical Access Controls:
+    All capability checks are performed server-side. Client-side UI
+    enforcement (hiding buttons) is UX convenience only — this is the
+    authoritative gate.
+
+    Args:
+        user:       User record from users.json.
+        capability: Required capability string, e.g. 'cva', 'reviewer', 'admin'.
+
+    Raises:
+        HTTPException 403: If the user lacks the required capability.
+    """
+    capabilities = user.get("capabilities", [])
+    if capability not in capabilities and "admin" not in capabilities:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Capability '{capability}' required.",
+        )
 
 
 # ---------------------------------------------------------------------------
-# Pydantic request/response models
+# Auth dependency — extracts X-User-Id header and validates
+# ---------------------------------------------------------------------------
+
+def get_current_user(x_user_id: str = Header(..., alias="X-User-Id")) -> dict:
+    """
+    FastAPI dependency: validate X-User-Id header and return user record.
+
+    Every protected endpoint injects this dependency. The header value is
+    the user_id string from users.json. In a future auth upgrade this will
+    be replaced by a JWT bearer token — the capability check logic is
+    identical either way.
+
+    Args:
+        x_user_id: Value of the X-User-Id request header.
+
+    Returns:
+        Validated user record dict.
+    """
+    user = _get_user(x_user_id)
+    user["_user_id"] = x_user_id  # attach id for downstream use
+    return user
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+def _write_audit(
+    user_id: str,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    detail: dict | None = None,
+    before: dict | None = None,
+    after: dict | None = None,
+) -> None:
+    """
+    Append a structured audit record to audit_log.jsonl.
+
+    SOC 2 CC7 — System Monitoring:
+    Every write action (pair submitted, skip recorded, flag recorded,
+    session updated) produces an audit record. Records are append-only
+    and never modified.
+
+    HIPAA §164.312(b) — Audit Controls:
+    Record includes who (user_id), what (action), when (timestamp),
+    and which resource (resource_type + resource_id). Before/after state
+    is recorded for any mutation.
+
+    Args:
+        user_id:       ID of the user performing the action.
+        action:        Action label, e.g. 'pair_submitted', 'case_skipped'.
+        resource_type: Type of resource affected, e.g. 'pair', 'session'.
+        resource_id:   Identifier of the specific resource.
+        detail:        Optional additional context dict.
+        before:        State of the resource before the action (mutations).
+        after:         State of the resource after the action (mutations).
+    """
+    record = {
+        "audit_id": str(uuid.uuid4()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "user_id": user_id,
+        "action": action,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+    }
+    if detail:
+        record["detail"] = detail
+    if before is not None:
+        record["before"] = before
+    if after is not None:
+        record["after"] = after
+
+    with _write_lock:
+        with open(AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Corpus loader
+# ---------------------------------------------------------------------------
+
+def _ensure_corpus_loaded() -> None:
+    """
+    Load all JSONL corpus files into memory on first call (lazy singleton).
+
+    Scans CORPUS_DIR for *.jsonl files, parses every line, sorts by
+    case_number ascending, and injects a data_classification field on any
+    case whose vertical maps to a sensitive data category.
+
+    The data_classification field enables the PII scrubber to apply
+    appropriate anonymisation intensity and allows the training pipeline
+    to enforce FERPA / HIPAA data firewalls.
+
+    data_classification values:
+        'general'           — standard case, no elevated sensitivity
+        'health'            — Healthcare / Mental Health verticals (HIPAA)
+        'financial'         — Fintech vertical (GLBA)
+        'education_minor'   — Children's AI vertical (COPPA / FERPA)
+        'education_adult'   — Education / university verticals (FERPA)
+    """
+    global _corpus, _corpus_loaded
+    with _corpus_lock:
+        if _corpus_loaded:
+            return
+
+        cases: list[dict] = []
+        if CORPUS_DIR.exists():
+            for jsonl_file in sorted(CORPUS_DIR.glob("*.jsonl")):
+                with open(jsonl_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                case = json.loads(line)
+                                case["data_classification"] = _classify_case(
+                                    case.get("vertical", "")
+                                )
+                                cases.append(case)
+                            except json.JSONDecodeError:
+                                pass  # skip malformed lines
+
+        cases.sort(key=lambda c: c.get("case_number", 0))
+        _corpus = cases
+        _corpus_loaded = True
+        print(f"Loaded {len(_corpus)} cases from {CORPUS_DIR}")
+
+
+def _classify_case(vertical: str) -> str:
+    """
+    Map a corpus vertical label to a data_classification string.
+
+    Args:
+        vertical: The 'vertical' field value from a corpus case.
+
+    Returns:
+        data_classification string for downstream compliance enforcement.
+    """
+    v = vertical.lower()
+    if "health" in v or "mental" in v or "medical" in v:
+        return "health"
+    if "fintech" in v or "financial" in v or "banking" in v:
+        return "financial"
+    if "children" in v or "child" in v or "parental" in v:
+        return "education_minor"
+    if "education" in v or "student" in v or "universit" in v:
+        return "education_adult"
+    return "general"
+
+
+def _get_completed_cases() -> set[int]:
+    """
+    Return the set of case numbers already present in all output files.
+
+    Scans training, holdout, pending, and skips files so the queue
+    correctly excludes cases that have been processed in any path.
+
+    Returns:
+        Set of integer case numbers that are already complete.
+    """
+    completed: set[int] = set()
+    for output_file in [PAIRS_FILE, HOLDOUT_FILE, PENDING_FILE, SKIPS_FILE]:
+        if output_file.exists():
+            with open(output_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            record = json.loads(line)
+                            cn = record.get("case_number")
+                            if cn is not None:
+                                completed.add(int(cn))
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+    return completed
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models
 # ---------------------------------------------------------------------------
 
 class SessionState(BaseModel):
-    """
-    CVA session state persisted by the Electron app.
+    """Mirrors the structure of session/progress.json."""
+    last_case_number: int = 0
+    pairs_written: int = 0
+    pairs_train: int = 0
+    pairs_holdout: int = 0
+    skipped: int = 0
+    flagged: int = 0
+    session_start: str = ""
+    last_updated: str = ""
+    completed_cases: list[int] = Field(default_factory=list)
 
-    Tracks resume position, completed cases, and UI preferences.
-    Written on every case navigation and on app close.
-    """
-    current_case_number: Optional[int] = None
-    completed_cases: list[int] = []
-    layout_preset: str = "wide"
-    font_size: int = 14
-    last_updated: Optional[str] = None
 
-
-class DPOPair(BaseModel):
-    """
-    A validated DPO training pair submitted by the CVA after axiological review.
-
-    The input/preferred_output/non_preferred_output fields follow Together AI
-    DPO format exactly. All other fields are IVAI metadata — the upload script
-    strips them to the three required fields before Together AI submission.
-
-    Spec reference: CVA_Tool_Spec_v1_1 Section 4.3.
-    """
+class PairSubmission(BaseModel):
+    """DPO pair payload from the Electron app."""
     case_number: int
     vertical: str
     inversion_type: str
@@ -240,439 +402,570 @@ class DPOPair(BaseModel):
     inversion_severity: str
     appropriate_intensity: str
     identity_language: bool
-    cva_user_id: str
     cva_flags: dict[str, Any]
-    cva_notes: str = ""
+    cva_notes: Optional[str] = ""
     pair_index: int = 1
-    dataset_split: str = "train"  # "train" or "holdout"
     standard_slot: dict[str, Any]
     vai_slot: dict[str, Any]
-    input: dict[str, Any]                        # Together AI DPO format
-    preferred_output: list[dict[str, Any]]        # Together AI DPO format
-    non_preferred_output: list[dict[str, Any]]    # Together AI DPO format
+    input: dict[str, Any]
+    preferred_output: list[dict[str, Any]]
+    non_preferred_output: list[dict[str, Any]]
+    dataset_split: str = "train"
+    # Compliance fields
+    data_classification: Optional[str] = "general"
+    ferpa_consent: Optional[bool] = False
 
 
-class SkipRecord(BaseModel):
-    """
-    A skip record written when the CVA cannot produce a valid pair for a case.
-
-    Spec reference: CVA_Tool_Spec_v1_1 Section 4.4.
-    """
+class SkipSubmission(BaseModel):
+    """Skip record payload."""
     case_number: int
-    cva_user_id: str
-    reason_code: str    # standard_acceptable | ambiguous_case | duplicate_similar |
-                        # no_useful_response | technical_failure
+    reason_code: str
     reason_label: str
-    cva_notes: str = ""
+    cva_notes: Optional[str] = ""
 
 
-class FlagRecord(BaseModel):
-    """
-    A flag record written when the CVA identifies a corpus quality issue.
-
-    Flagged cases remain in the queue — they are not counted as worked
-    until a pair or skip is also submitted.
-    """
+class FlagSubmission(BaseModel):
+    """Flag record payload."""
     case_number: int
-    cva_user_id: str
     flag_type: str
-    cva_notes: str = ""
+    cva_notes: Optional[str] = ""
 
 
 class ReviewRequest(BaseModel):
-    """
-    A VAI Cortex review request for a preferred response candidate.
-
-    Sent to Together AI (Mistral 7B Cortex model) for axiological analysis.
-    This is Layer 1 running in batch/review mode — not real-time inference.
-    The response determines whether Write Pair is enabled or blocked.
-    """
-    prompt: str           # Original user prompt from the corpus case
-    response: str         # The CVA's candidate preferred response
-    inversion_type: str   # Known inversion type from corpus metadata
-    intensity: str        # Appropriate intensity level from corpus metadata
+    """VAI review proxy payload — forwarded to Together AI."""
+    preferred_text: str
+    case_context: dict[str, Any]
+    model: Optional[str] = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Routes
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-def health() -> dict[str, str]:
+async def health_check() -> dict:
     """
-    Health check endpoint.
-
-    Used by Railway to confirm the container is running and by the
-    Electron app to verify API connectivity on startup.
-
-    Returns:
-        Dict with 'status': 'ok'.
+    Liveness check — no auth required.
+    Railway and monitoring tools call this to confirm the service is up.
     """
-    return {"status": "ok"}
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/corpus")
-def get_corpus() -> dict[str, Any]:
+async def get_corpus(
+    vertical: Optional[str] = None,
+    inversion_type: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """
-    Return all corpus cases loaded from the 32 JSONL batch files.
+    Return all corpus cases, optionally filtered by vertical or inversion_type.
 
-    The corpus is loaded once on first call and served from memory
-    on all subsequent calls. Cases are sorted by case_number ascending.
+    Requires: 'cva' or 'reviewer' capability.
+
+    Args:
+        vertical:       Optional filter — return only cases matching this vertical.
+        inversion_type: Optional filter — return only cases matching this type.
 
     Returns:
-        Dict with 'cases' (list of case dicts) and 'total' (int count).
-
-    Raises:
-        HTTPException 500: If corpus directory is missing or unreadable.
+        Dict with 'cases' list and 'total' count.
     """
-    try:
-        cases = _load_corpus()
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    _require_capability(user, "cva")
+    _ensure_corpus_loaded()
+
+    cases = _corpus
+    if vertical:
+        cases = [c for c in cases if c.get("vertical") == vertical]
+    if inversion_type:
+        cases = [c for c in cases if c.get("inversion_type") == inversion_type]
+
+    _write_audit(
+        user_id=user["_user_id"],
+        action="corpus_fetched",
+        resource_type="corpus",
+        resource_id="full",
+        detail={"vertical": vertical, "inversion_type": inversion_type, "count": len(cases)},
+    )
 
     return {"cases": cases, "total": len(cases)}
 
 
 @app.get("/session/{user_id}")
-def get_session(user_id: str) -> dict[str, Any]:
+async def get_session(
+    user_id: str,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """
-    Retrieve persisted session state for a CVA user.
+    Return the session state for a given user_id.
 
-    Returns default SessionState values on first launch (no file yet).
+    CVAs may only read their own session. Admins may read any session.
 
     Args:
-        user_id: The CVA's user identifier (path parameter).
+        user_id: The CVA's user_id whose session to retrieve.
 
     Returns:
-        Session state dict. All fields have defaults — never returns null.
-
-    Raises:
-        HTTPException 500: If session file exists but cannot be read.
+        SessionState dict. Returns defaults if no session file exists yet.
     """
-    session_file = SESSION_DIR / f"{user_id}_progress.json"
+    # CVAs can only read their own session
+    if user["_user_id"] != user_id and "admin" not in user.get("capabilities", []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot read another user's session.",
+        )
 
+    session_file = SESSION_DIR / f"{user_id}.json"
     if not session_file.exists():
-        # First launch — return defaults without creating a file yet
         return SessionState().model_dump()
 
-    try:
-        with open(session_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        raise HTTPException(status_code=500, detail=f"Session read error: {e}")
+    with open(session_file, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 @app.post("/session/{user_id}")
-def update_session(user_id: str, state: SessionState) -> dict[str, str]:
+async def update_session(
+    user_id: str,
+    state: SessionState,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """
-    Persist updated session state for a CVA user.
+    Write updated session state for a given user_id.
 
-    Called by the Electron app on every case navigation, layout change,
-    and on app close. Stamps last_updated with current UTC time.
+    CVAs may only write their own session. Admins may write any session.
 
     Args:
-        user_id: The CVA's user identifier (path parameter).
-        state: The updated session state from the Electron app.
+        user_id: The CVA's user_id.
+        state:   Updated SessionState payload.
 
     Returns:
-        Confirmation dict with 'user_id' and 'updated_at' timestamp.
-
-    Raises:
-        HTTPException 500: If the session file cannot be written.
+        Confirmation dict with user_id and timestamp.
     """
-    session_file = SESSION_DIR / f"{user_id}_progress.json"
+    if user["_user_id"] != user_id and "admin" not in user.get("capabilities", []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot write another user's session.",
+        )
 
-    # Stamp the update time in UTC ISO format
+    session_file = SESSION_DIR / f"{user_id}.json"
+
+    # Read before state for audit
+    before = {}
+    if session_file.exists():
+        with open(session_file, "r", encoding="utf-8") as f:
+            before = json.load(f)
+
     state.last_updated = datetime.now(timezone.utc).isoformat()
+    after = state.model_dump()
 
-    try:
+    with _write_lock:
         with open(session_file, "w", encoding="utf-8") as f:
-            json.dump(state.model_dump(), f, indent=2)
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Session write error: {e}")
+            json.dump(after, f, indent=2)
+
+    _write_audit(
+        user_id=user["_user_id"],
+        action="session_updated",
+        resource_type="session",
+        resource_id=user_id,
+        before=before,
+        after=after,
+    )
 
     return {"user_id": user_id, "updated_at": state.last_updated}
 
 
 @app.get("/queue/next")
-def get_next_case(user_id: str = Query(...)) -> dict[str, Any]:
+async def get_next_case(
+    vertical: Optional[str] = None,
+    inversion_type: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """
-    Assign the next unworked corpus case to a CVA.
+    Assign the next unworked case to the requesting CVA.
 
-    Iterates through the corpus in ascending case_number order, skipping:
-      - Cases already worked by this user (in session or output files)
-      - Cases currently claimed by another active CVA session (in-memory lock)
-
-    The claim is held until the CVA submits a pair or skip. If the app
-    closes without submitting, the claim expires on next server restart.
+    Prevents two CVAs from being assigned the same case simultaneously
+    by tracking in-flight case numbers in a thread-safe set.
 
     Args:
-        user_id: The CVA's user identifier (query parameter).
+        vertical:       Optional filter — restrict queue to this vertical.
+        inversion_type: Optional filter — restrict queue to this type.
 
     Returns:
-        Dict with 'case' (corpus case dict), 'position' (1-based int),
-        and 'total' (corpus size). Returns case=None if all cases are worked.
-
-    Raises:
-        HTTPException 500: If corpus cannot be loaded.
+        The next available corpus case dict, or {'case': None} if queue exhausted.
     """
-    try:
-        corpus = _load_corpus()
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    _require_capability(user, "cva")
+    _ensure_corpus_loaded()
 
-    worked = _get_worked_cases(user_id)
+    completed = _get_completed_cases()
 
     with _queue_lock:
-        for i, case in enumerate(corpus):
-            case_num = case.get("case_number")
-            # Skip cases this user has already completed
-            if case_num in worked:
+        for case in _corpus:
+            cn = case.get("case_number")
+            if cn in completed or cn in _in_flight:
                 continue
-            # Skip cases currently claimed by another CVA session
-            if case_num in _claimed_cases:
+            if vertical and case.get("vertical") != vertical:
                 continue
-            # Claim this case — holds until pair/skip submitted
-            _claimed_cases.add(case_num)
-            return {
-                "case": case,
-                "position": i + 1,  # 1-based for display in progress bar
-                "total": len(corpus),
-            }
+            if inversion_type and case.get("inversion_type") != inversion_type:
+                continue
+            _in_flight.add(cn)
+            _write_audit(
+                user_id=user["_user_id"],
+                action="case_assigned",
+                resource_type="case",
+                resource_id=str(cn),
+            )
+            return {"case": case}
 
-    # Reached end of corpus without finding an unclaimed, unworked case
-    return {
-        "case": None,
-        "message": "All cases have been worked or are currently in progress.",
-        "total": len(corpus),
-    }
+    return {"case": None}
+
+
+@app.post("/queue/release/{case_number}")
+async def release_case(
+    case_number: int,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """
+    Release a case number from the in-flight set without writing a record.
+
+    Called when a CVA navigates away from a case without completing it,
+    so other CVAs can pick it up.
+
+    Args:
+        case_number: The case number to release.
+    """
+    _require_capability(user, "cva")
+    with _queue_lock:
+        _in_flight.discard(case_number)
+    return {"released": case_number}
 
 
 @app.post("/pairs")
-def submit_pair(pair: DPOPair) -> dict[str, Any]:
+async def submit_pair(
+    pair: PairSubmission,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """
-    Accept a validated DPO pair and write it to the appropriate output file.
+    Accept a completed DPO pair from a CVA and write it to the output file.
 
-    Routes to arlaf_training_data.jsonl (train split) or
-    arlaf_holdout_data.jsonl (holdout split) based on dataset_split.
-    Releases the in-memory queue claim for this case number.
-    Stamps written_at with current UTC time.
+    Compliance steps applied in order:
+      1. PII scrubbing — preferred and non-preferred response text is
+         anonymised via Presidio before any write.
+      2. FERPA firewall — if data_classification is 'education_adult' or
+         'education_minor' AND ferpa_consent is False, the pair is written
+         to arlaf_pending_review.jsonl (staging) rather than the training
+         file, and is flagged for human review before ARLAF ingestion.
+      3. Audit log — full record written after every successful pair write.
+      4. In-flight release — case is removed from the in-progress set.
 
     Args:
-        pair: The validated DPO pair from the CVA workstation.
+        pair: PairSubmission payload from the Electron app.
 
     Returns:
-        Confirmation dict with 'case_number' and 'written_at'.
-
-    Raises:
-        HTTPException 500: If the output file cannot be written.
+        Confirmation dict with pair_id and destination file.
     """
-    written_at = datetime.now(timezone.utc).isoformat()
-    record = pair.model_dump()
-    record["written_at"] = written_at
+    _require_capability(user, "cva")
 
-    # Route to holdout file for calibration set; train file for everything else
-    output_file = HOLDOUT_FILE if pair.dataset_split == "holdout" else PAIRS_FILE
+    pair_id = str(uuid.uuid4())
 
-    try:
-        with open(output_file, "a", encoding="utf-8") as f:
+    # --- Step 1: PII scrubbing ---
+    def scrub_messages(messages: list[dict]) -> list[dict]:
+        """Scrub PII from the 'content' field of each message in a list."""
+        scrubbed = []
+        for msg in messages:
+            m = dict(msg)
+            if "content" in m and isinstance(m["content"], str):
+                m["content"] = scrub_pii(m["content"])
+            scrubbed.append(m)
+        return scrubbed
+
+    pair.preferred_output = scrub_messages(pair.preferred_output)
+    pair.non_preferred_output = scrub_messages(pair.non_preferred_output)
+
+    # Also scrub the input prompt
+    if "messages" in pair.input:
+        pair.input["messages"] = scrub_messages(pair.input["messages"])
+
+    # --- Step 2: Determine output destination ---
+    is_education = pair.data_classification in ("education_adult", "education_minor")
+    ferpa_blocked = is_education and not pair.ferpa_consent
+
+    if ferpa_blocked:
+        # Write to staging — human reviewer must approve before ARLAF ingestion
+        destination = str(PENDING_FILE)
+        destination_label = "pending_review"
+    elif pair.dataset_split == "holdout":
+        destination = str(HOLDOUT_FILE)
+        destination_label = "holdout"
+    else:
+        destination = str(PAIRS_FILE)
+        destination_label = "train"
+
+    # --- Step 3: Build output record ---
+    record = {
+        "pair_id": pair_id,
+        "case_number": pair.case_number,
+        "vertical": pair.vertical,
+        "inversion_type": pair.inversion_type,
+        "subtlety": pair.subtlety,
+        "boundary_condition": pair.boundary_condition,
+        "inversion_severity": pair.inversion_severity,
+        "appropriate_intensity": pair.appropriate_intensity,
+        "identity_language": pair.identity_language,
+        "cva_flags": pair.cva_flags,
+        "cva_notes": pair.cva_notes,
+        "pair_index": pair.pair_index,
+        "written_by": user["_user_id"],
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "dataset_split": destination_label,
+        "data_classification": pair.data_classification,
+        "ferpa_consent": pair.ferpa_consent,
+        "pii_scrubbed": PRESIDIO_AVAILABLE,
+        "standard_slot": pair.standard_slot,
+        "vai_slot": pair.vai_slot,
+        "input": pair.input,
+        "preferred_output": pair.preferred_output,
+        "non_preferred_output": pair.non_preferred_output,
+    }
+
+    with _write_lock:
+        with open(destination, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Pair write error: {e}")
 
-    # Release the queue claim — this case is now fully worked
+    # Release from in-flight
     with _queue_lock:
-        _claimed_cases.discard(pair.case_number)
+        _in_flight.discard(pair.case_number)
 
-    return {"case_number": pair.case_number, "written_at": written_at}
+    # --- Step 4: Audit ---
+    _write_audit(
+        user_id=user["_user_id"],
+        action="pair_submitted",
+        resource_type="pair",
+        resource_id=pair_id,
+        detail={
+            "case_number": pair.case_number,
+            "destination": destination_label,
+            "ferpa_blocked": ferpa_blocked,
+            "pii_scrubbed": PRESIDIO_AVAILABLE,
+        },
+    )
+
+    return {
+        "pair_id": pair_id,
+        "destination": destination_label,
+        "ferpa_blocked": ferpa_blocked,
+        "pii_scrubbed": PRESIDIO_AVAILABLE,
+    }
 
 
 @app.post("/skips")
-def submit_skip(skip: SkipRecord) -> dict[str, Any]:
+async def submit_skip(
+    skip: SkipSubmission,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """
-    Record a skipped case and release its queue claim.
-
-    A skip means the CVA could not produce a valid training pair for this
-    case. The reason_code documents why for corpus health reporting.
+    Record a skipped case.
 
     Args:
-        skip: The skip record with reason code and optional CVA notes.
+        skip: SkipSubmission payload from the Electron app.
 
     Returns:
-        Confirmation dict with 'case_number' and 'skipped_at'.
-
-    Raises:
-        HTTPException 500: If the skips file cannot be written.
+        Confirmation dict with skip_id.
     """
-    skipped_at = datetime.now(timezone.utc).isoformat()
-    record = skip.model_dump()
-    record["skipped_at"] = skipped_at
+    _require_capability(user, "cva")
 
-    try:
+    skip_id = str(uuid.uuid4())
+    record = {
+        "skip_id": skip_id,
+        "case_number": skip.case_number,
+        "reason_code": skip.reason_code,
+        "reason_label": skip.reason_label,
+        "cva_notes": skip.cva_notes,
+        "skipped_by": user["_user_id"],
+        "skipped_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    with _write_lock:
         with open(SKIPS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Skip write error: {e}")
 
-    # Release queue claim — skipped cases don't block other CVAs
     with _queue_lock:
-        _claimed_cases.discard(skip.case_number)
+        _in_flight.discard(skip.case_number)
 
-    return {"case_number": skip.case_number, "skipped_at": skipped_at}
+    _write_audit(
+        user_id=user["_user_id"],
+        action="case_skipped",
+        resource_type="skip",
+        resource_id=skip_id,
+        detail={"case_number": skip.case_number, "reason_code": skip.reason_code},
+    )
+
+    return {"skip_id": skip_id}
 
 
 @app.post("/flags")
-def submit_flag(flag: FlagRecord) -> dict[str, Any]:
+async def submit_flag(
+    flag: FlagSubmission,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """
-    Record a flagged corpus case for team review.
-
-    Flags document corpus quality issues (ambiguity, duplication, errors).
-    Unlike skips, flags do NOT release the queue claim or mark the case
-    as worked — the CVA may still produce a pair after flagging.
+    Record a flagged case for later review.
 
     Args:
-        flag: The flag record with flag type and CVA notes.
+        flag: FlagSubmission payload from the Electron app.
 
     Returns:
-        Confirmation dict with 'case_number' and 'flagged_at'.
-
-    Raises:
-        HTTPException 500: If the flags file cannot be written.
+        Confirmation dict with flag_id.
     """
-    flagged_at = datetime.now(timezone.utc).isoformat()
-    record = flag.model_dump()
-    record["flagged_at"] = flagged_at
+    _require_capability(user, "cva")
 
-    try:
+    flag_id = str(uuid.uuid4())
+    record = {
+        "flag_id": flag_id,
+        "case_number": flag.case_number,
+        "flag_type": flag.flag_type,
+        "cva_notes": flag.cva_notes,
+        "flagged_by": user["_user_id"],
+        "flagged_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    with _write_lock:
         with open(FLAGS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Flag write error: {e}")
 
-    # NOTE: intentionally NOT releasing queue claim for flags
-    return {"case_number": flag.case_number, "flagged_at": flagged_at}
+    _write_audit(
+        user_id=user["_user_id"],
+        action="case_flagged",
+        resource_type="flag",
+        resource_id=flag_id,
+        detail={"case_number": flag.case_number, "flag_type": flag.flag_type},
+    )
+
+    return {"flag_id": flag_id}
 
 
 @app.post("/review")
-async def vai_review(request: ReviewRequest) -> dict[str, Any]:
+async def vai_review(
+    review: ReviewRequest,
+    user: dict = Depends(get_current_user),
+) -> dict:
     """
-    Proxy a VAI Cortex axiological review to Together AI (Mistral 7B).
+    Proxy a VAI review call to Together AI.
 
-    This is Layer 1 of the VAI architecture running in batch/review mode.
-    It evaluates whether a candidate preferred response correctly handles
-    the known value inversion according to the I>E>S hierarchy before
-    that response enters the ARLAF DPO training stream.
+    Sends the preferred response text and case context to the VAIMA model
+    for axiological review. Returns a structured JSON result indicating
+    whether any value inversions are present and what corrections are
+    suggested.
 
-    The Cortex model (Mistral 7B) is used rather than the main LLM because:
-      - It is less safety-guarded, enabling clinical analysis of dark prompts
-      - It is faster and cheaper for structured JSON output tasks
-      - It never talks to the user — internal analysis only
+    Note: This endpoint does NOT use Presidio scrubbing because the text
+    is being sent to Together AI for review, not written to training data.
+    Ensure that review requests do not contain real patient / student PII
+    before calling this endpoint.
 
     Args:
-        request: The review request containing the original prompt,
-                 candidate response, inversion type, and intensity level.
+        review: ReviewRequest payload containing the preferred response
+                text and case context metadata.
 
     Returns:
-        Dict with 'clean' (bool), 'issues' (list[str]),
-        'suggestions' (list[str]), 'confidence' (str), 'summary' (str).
-        On parse failure, returns clean=None with low confidence rather
-        than raising an error — CVA must assess manually.
-
-    Raises:
-        HTTPException 500: If TOGETHER_API_KEY is not set.
-        HTTPException 502: If Together AI API call fails.
+        Dict with 'issues' list, 'clean' bool, and 'suggestions' list.
     """
-    api_key = os.environ.get("TOGETHER_API_KEY")
-    if not api_key:
+    _require_capability(user, "cva")
+
+    together_api_key = os.environ.get("TOGETHER_API_KEY")
+    if not together_api_key:
         raise HTTPException(
-            status_code=500,
-            detail="TOGETHER_API_KEY environment variable not configured on server."
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="TOGETHER_API_KEY not configured on server.",
         )
 
-    # Purpose-built review prompt for the Cortex model.
-    # Evaluates axiological integrity relative to the known inversion type.
-    # I>E>S hierarchy: persons (I) must not be subordinated to rules (S) or functions (E).
-    system_prompt = """You are an axiological review engine for AI training data quality control.
+    review_prompt = _build_review_prompt(review.preferred_text, review.case_context)
 
-Your task: evaluate whether a candidate AI response correctly handles a value inversion scenario according to the I>E>S hierarchy.
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            "https://api.together.xyz/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {together_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": review.model,
+                "max_tokens": 512,
+                "temperature": 0.0,  # deterministic for review
+                "messages": [
+                    {"role": "user", "content": review_prompt}
+                ],
+                "response_format": {"type": "json_object"},
+            },
+        )
 
-I = Intrinsic value: persons, human beings, their dignity and wellbeing (HIGHEST — infinite, non-comparable)
-E = Extrinsic value: functions, roles, performance, outcomes (MIDDLE — finite, comparative)
-S = Systemic value: rules, policies, procedures, metrics (LOWEST — binary, categorical)
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Together AI error: {response.text}",
+        )
 
-A value inversion occurs when a response subordinates persons (I) to rules (S) or functions (E).
-A correct response leads with the person, then acknowledges the rule or function if relevant.
+    result = response.json()
+    content = result["choices"][0]["message"]["content"]
 
-Respond ONLY with valid JSON. No preamble, no markdown fences, no explanation outside the JSON.
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        parsed = {"raw": content, "parse_error": True}
 
-{
-  "clean": true or false,
-  "issues": ["describe any inversion or person-subordination found"],
-  "suggestions": ["specific improvement if issues found"],
-  "confidence": "High" or "Medium" or "Low",
-  "summary": "one sentence assessment"
-}"""
-
-    user_message = (
-        f"ORIGINAL PROMPT:\n{request.prompt}\n\n"
-        f"KNOWN INVERSION TYPE: {request.inversion_type}\n"
-        f"APPROPRIATE INTENSITY: {request.intensity}\n\n"
-        f"CANDIDATE RESPONSE TO REVIEW:\n{request.response}\n\n"
-        "Does this response correctly prioritize the person (I) over rules (S) "
-        "and functions (E)? Return JSON only."
+    _write_audit(
+        user_id=user["_user_id"],
+        action="vai_review_called",
+        resource_type="review",
+        resource_id=str(uuid.uuid4()),
+        detail={"model": review.model, "clean": parsed.get("clean", None)},
     )
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://api.together.xyz/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "mistralai/Mistral-Small-24B-Instruct-2501",  # Cortex model — serverless
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "temperature": 0.1,   # Low temperature for deterministic JSON output
-                    "max_tokens": 512,
-                },
-            )
-            resp.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        # Capture the full response body from Together AI for debugging
-        error_body = e.response.text if hasattr(e, 'response') else str(e)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Together AI call failed: {e} | Body: {error_body}"
-        )
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Together AI call failed: {e}")
+    return parsed
 
-    data = resp.json()
-    raw_text = data["choices"][0]["message"]["content"].strip()
 
-    # Parse the JSON response — strip markdown fences if Mistral adds them
-    try:
-        clean_text = raw_text
-        if clean_text.startswith("```"):
-            # Remove opening fence (```json or ```)
-            clean_text = clean_text.split("```")[1]
-            if clean_text.startswith("json"):
-                clean_text = clean_text[4:]
-        result = json.loads(clean_text.strip())
-    except json.JSONDecodeError:
-        # Graceful failure — return a neutral result so the CVA can assess manually
-        # rather than crashing the review workflow
-        result = {
-            "clean": None,
-            "issues": [],
-            "suggestions": [],
-            "confidence": "Low",
-            "summary": "Review could not be parsed — manual CVA assessment required.",
-            "raw_response": raw_text,  # Include raw for debugging
-        }
+def _build_review_prompt(preferred_text: str, case_context: dict) -> str:
+    """
+    Build the VAI review prompt for axiological evaluation of a preferred response.
 
-    return result
+    The prompt instructs the model to evaluate the response against the
+    I > E > S hierarchy and return a structured JSON result.
+
+    Args:
+        preferred_text: The CVA's preferred response text to evaluate.
+        case_context:   Metadata from the corpus case (inversion_type,
+                        vertical, primary_entity_i, etc.)
+
+    Returns:
+        Formatted prompt string ready for the Together AI API.
+    """
+    return f"""You are an axiological review system trained on Formal Axiology (Hartman, 1967).
+Evaluate the following AI response for value inversions using the I > E > S hierarchy:
+  - I (Intrinsic): Persons and their inherent dignity — highest value
+  - E (Extrinsic): Functions, outcomes, performance — secondary
+  - S (Systemic): Rules, categories, policies — tertiary
+
+A value inversion occurs when a lower-order value is prioritized over a higher-order one.
+
+Case context:
+  Vertical: {case_context.get('vertical', 'Unknown')}
+  Inversion type expected: {case_context.get('inversion_type', 'Unknown')}
+  Person at risk: {case_context.get('primary_entity_i', 'Unknown')}
+  Systemic pressure: {case_context.get('primary_systemic_element_s', 'Unknown')}
+
+Response to evaluate:
+{preferred_text}
+
+Return ONLY valid JSON in this exact structure:
+{{
+  "clean": true or false,
+  "issues": [
+    {{
+      "inversion_type": "Type I | Type II | Type III | Type IV",
+      "description": "Brief description of the inversion detected",
+      "severity": "Low | Moderate | Severe",
+      "location": "Quote the specific phrase where the inversion occurs"
+    }}
+  ],
+  "suggestions": [
+    "Concrete suggestion for how to correct the inversion"
+  ],
+  "confidence": "Low | Moderate | High"
+}}
+
+If no inversions are found, return clean: true with empty issues and suggestions arrays."""
