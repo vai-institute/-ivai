@@ -288,6 +288,25 @@
           </div>
           <!-- Quill WYSIWYG editor — shown when Edit mode is active -->
           <div id="vai-quill-container" style="display:none;">
+            <!-- Custom toolbar — Quill binds to this via modules.toolbar selector -->
+            <div id="vai-quill-toolbar">
+              <span class="ql-formats">
+                <button class="ql-bold"></button>
+                <button class="ql-italic"></button>
+              </span>
+              <span class="ql-formats">
+                <button class="ql-list" value="ordered"></button>
+                <button class="ql-list" value="bullet"></button>
+              </span>
+              <span class="ql-formats">
+                <button class="ql-clean"></button>
+              </span>
+              <span class="ql-formats">
+                <button class="ql-highlight-i" title="Intrinsic (Person)">I</button>
+                <button class="ql-highlight-e" title="Extrinsic (Function)">E</button>
+                <button class="ql-highlight-s" title="Systemic (Rule)">S</button>
+              </span>
+            </div>
             <div id="vai-quill-editor"></div>
           </div>
           <div class="panel-footer" id="vai-panel-footer">

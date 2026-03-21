@@ -1177,13 +1177,9 @@ function initQuillEditor() {
   quillEditor = new Quill('#vai-quill-editor', {
     theme: 'snow',
     modules: {
-      toolbar: [
-        ['bold', 'italic'],
-        [{ 'list': 'ordered' }, { 'list': 'bullet' }],
-        ['clean']
-      ]
+      toolbar: '#vai-quill-toolbar'  // use custom toolbar element from HTML
     },
-    formats: ['bold', 'italic', 'list'], // whitelist — all others stripped
+    formats: ['bold', 'italic', 'list', 'background'], // background needed for highlights
     placeholder: 'Edit the VAI response here…'
   });
 
@@ -1196,8 +1192,67 @@ function initQuillEditor() {
     }
   });
 
-  console.log('[quill] Editor initialized.');
+  // Wire axiological highlight buttons (I / E / S)
+  var highlightI = document.querySelector('.ql-highlight-i');
+  var highlightE = document.querySelector('.ql-highlight-e');
+  var highlightS = document.querySelector('.ql-highlight-s');
+
+  if (highlightI) highlightI.addEventListener('click', function() {
+    applyHighlight('#b7f7c2', quillEditor);
+  });
+  if (highlightE) highlightE.addEventListener('click', function() {
+    applyHighlight('#ffe0b2', quillEditor);
+  });
+  if (highlightS) highlightS.addEventListener('click', function() {
+    applyHighlight('#e0e0e0', quillEditor);
+  });
+
+  console.log('[quill] Editor initialized with axiological highlight buttons.');
   return quillEditor;
+}
+
+/**
+ * Wires the three axiological highlight buttons to Quill's
+ * background format. Colors map to the I>E>S hierarchy:
+ *   Intrinsic  = #b7f7c2  (light green)  — person at risk
+ *   Extrinsic  = #ffe0b2  (light orange) — function/role
+ *   Systemic   = #e0e0e0  (gray)         — rule/policy
+ *
+ * Highlights are CVA annotation only. They are stripped by
+ * stripHighlights() before any training data write.
+ *
+ * @param {string} color - Quill background color hex string
+ * @param {Quill} quill  - the Quill editor instance
+ */
+function applyHighlight(color, quill) {
+  var range = quill.getSelection();
+  if (!range || range.length === 0) return;
+  var currentFormat = quill.getFormat(range);
+  // Toggle: if same color already applied, remove it
+  var newColor = currentFormat.background === color ? false : color;
+  quill.formatText(range.index, range.length, 'background', newColor);
+}
+
+/**
+ * Strips all Quill background-color spans from HTML before
+ * markdown conversion. Highlights are CVA annotation only and
+ * must never appear in DPO training data output.
+ *
+ * Quill renders background color as:
+ *   <span style="background-color: #b7f7c2;">text</span>
+ * This function unwraps those spans, preserving the inner text
+ * and any other inline formatting.
+ *
+ * @param {string} html - raw HTML from Quill editor
+ * @returns {string}    - HTML with all background-color spans unwrapped
+ */
+function stripHighlights(html) {
+  var parser = new DOMParser();
+  var doc = parser.parseFromString(html, 'text/html');
+  doc.querySelectorAll('span[style*="background-color"]').forEach(function(span) {
+    span.replaceWith.apply(span, Array.from(span.childNodes));
+  });
+  return doc.body.innerHTML;
 }
 
 /**
@@ -1933,7 +1988,10 @@ function getVaiPanelText() {
       return getSlotText('vai-0');
     }
     if (turndownService) {
-      return turndownService.turndown(html);
+      // Strip axiological highlights before markdown conversion —
+      // highlights are CVA annotation only, never training data
+      var strippedHtml = stripHighlights(html);
+      return turndownService.turndown(strippedHtml);
     }
     // Fallback: return plain text if turndown unavailable
     return quillEditor.getText().trim();

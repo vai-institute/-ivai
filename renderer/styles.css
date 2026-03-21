@@ -1566,3 +1566,26 @@ body {
   pointer-events: none;
   cursor: not-allowed;
 }
+
+/* Axiological highlight toolbar buttons — I / E / S */
+.ql-toolbar .ql-highlight-i,
+.ql-toolbar .ql-highlight-e,
+.ql-toolbar .ql-highlight-s {
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid #ccc;
+  cursor: pointer;
+  line-height: 18px;
+  padding: 0;
+}
+/* Each button uses its own highlight color as background */
+.ql-toolbar .ql-highlight-i { background: #b7f7c2; color: #1a5c2a; }
+.ql-toolbar .ql-highlight-e { background: #ffe0b2; color: #7a3c00; }
+.ql-toolbar .ql-highlight-s { background: #e0e0e0; color: #333;    }
+
+.ql-toolbar .ql-highlight-i:hover { background: #8ff0a4; }
+.ql-toolbar .ql-highlight-e:hover { background: #ffcc80; }
+.ql-toolbar .ql-highlight-s:hover { background: #bdbdbd; }
