@@ -1726,6 +1726,18 @@ function onPreferredSelected(slotId) {
   }
 
   updateWritePairEnabled();
+
+  // Auto-fire Cortex review when CVA marks a response as Preferred.
+  // This ensures every preferred selection gets axiological validation
+  // without requiring a manual Test click.
+  var currentCase = corpus[currentIndex];
+  if (currentCase && text) {
+    fireCortexReview({
+      prompt:   (document.getElementById('prompt-textarea') || {}).value || '',
+      response: text,
+      caseData: currentCase
+    });
+  }
 }
 
 /**
@@ -1809,6 +1821,10 @@ function initRolePills() {
     });
   }
 }
+
+// AUDIT RESULT: Cortex call is NOT wired to Preferred pill selection as of 2026-03-20.
+// It only fires via the manual Test button (pill-vai-test → runCortexValidation).
+// Step 3B below adds auto-fire on Preferred selection.
 
 // ─── Step 7B: Edit, Test, and Cortex validation ──────────────────────────────
 
@@ -1926,6 +1942,61 @@ function getVaiPanelText() {
 }
 
 /**
+ * Fires an axiological Cortex review for a given prompt/response pair.
+ * Called automatically when the CVA marks a response as Preferred.
+ * Posts to the Railway API at POST /review with the response text and case metadata.
+ * Displays the result in the Cortex popup overlaid on the Standard panel.
+ * @param {object} payload - { prompt: string, response: string, caseData: object }
+ * @returns {Promise<void>}
+ */
+async function fireCortexReview(payload) {
+  var testBtn = document.getElementById('pill-vai-test');
+
+  // Show loading state
+  if (testBtn) {
+    testBtn.disabled    = true;
+    testBtn.textContent = '⟳ Reviewing…';
+  }
+
+  // Show loading indicator in existing popup location
+  showCortexPopup({ loading: true });
+
+  try {
+    var raw = await window.electronAPI.runCortexReview({
+      text:     payload.response,
+      caseData: payload.caseData
+    });
+
+    // Normalize API response shape
+    var result = {
+      has_issues:  raw.clean === false,
+      flags:       raw.issues       || [],
+      suggestions: raw.suggestions  || [],
+      confidence:  raw.confidence   || 'Low',
+      summary:     raw.summary      || '',
+      error:       raw.error        || null
+    };
+
+    cortexResult = result;
+    updateWritePairEnabled();
+    showCortexPopup(result);
+
+  } catch (err) {
+    console.error('[cortex] Auto-review failed:', err.message);
+    // Show inline error with retry button
+    showCortexPopup({
+      error: err.message,
+      retryPayload: payload
+    });
+  } finally {
+    if (testBtn) {
+      testBtn.disabled    = false;
+      testBtn.textContent = '⟳ Test';
+    }
+  }
+}
+
+/**
  * Runs Cortex validation on the current VAI panel text.
  * Calls the Railway /review endpoint via IPC.
  * Stores result in cortexResult.
@@ -2032,8 +2103,17 @@ function showCortexPopup(result) {
   // Build popup content
   var contentHtml;
 
-  if (result.error) {
-    contentHtml = '<div class="cortex-error">⚠ ' + result.error + '</div>';
+  if (result.loading) {
+    contentHtml = '<div class="cortex-loading" style="text-align:center;padding:16px;">' +
+                  '<span style="font-size:18px;">⟳</span> Reviewing…</div>';
+
+  } else if (result.error) {
+    contentHtml = '<div class="cortex-error">⚠ ' + result.error;
+    if (result.retryPayload) {
+      contentHtml += ' <button id="btn-cortex-retry" class="btn-ghost btn-xs" ' +
+                     'style="margin-left:8px;">↺ Retry</button>';
+    }
+    contentHtml += '</div>';
 
   } else if (!result.has_issues) {
     contentHtml = [
@@ -2117,6 +2197,14 @@ var flagsHtml = (result.flags || []).map(function(f) {
   if (closeBtn) {
     closeBtn.addEventListener('click', function() {
       popup.remove();
+    });
+  }
+
+  // Wire retry button (shown on Cortex call failure)
+  var retryBtn = document.getElementById('btn-cortex-retry');
+  if (retryBtn && result.retryPayload) {
+    retryBtn.addEventListener('click', function() {
+      fireCortexReview(result.retryPayload);
     });
   }
 
