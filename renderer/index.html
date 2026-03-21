@@ -24,6 +24,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CVA Curation Tool — IVAI</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="favicon.png"/>
   <link rel="stylesheet"
         href="../node_modules/quill/dist/quill.snow.css" />
 </head>
@@ -197,11 +198,11 @@
     ───────────────────────────────────────────────────────────────── -->
     <div id="center">
 
-      <!-- Prompt bar (read-only) -->
+      <!-- Prompt bar (editable) -->
       <div id="prompt-bar">
         <div id="prompt-bar-header">
           <div id="prompt-bar-label-wrap">
-            <span class="prompt-label">Original Prompt</span>
+            <span class="prompt-label">Prompt</span>
             <span id="prompt-case-id">—</span>
           </div>
           <div id="prompt-bar-badges">
@@ -211,9 +212,9 @@
             <span id="prompt-badge-intensity" class="badge"></span>
           </div>
         </div>
-        <div id="prompt-text-box">
-          <span class="prompt-placeholder">Navigate to a case to load the prompt.</span>
-        </div>
+        <textarea id="prompt-textarea" class="prompt-editable" rows="3"
+                  placeholder="Navigate to a case to load the prompt."></textarea>
+        <button id="btn-reset-prompt" class="btn-ghost btn-xs">↩ Reset to original</button>
       </div>
 
       <!-- Panels row: Standard | drag | VAI -->

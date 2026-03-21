@@ -143,6 +143,7 @@ function createMainWindow() {
     minHeight: 600,
     title: 'CVA Curation Tool — IVAI',
     backgroundColor: '#F5F4F0',
+    icon: path.join(__dirname, 'renderer', 'favicon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

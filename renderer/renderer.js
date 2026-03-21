@@ -105,6 +105,9 @@ let cortexResult = null;
  */
 let quillEditor = null;
 
+/** Stores the original (unedited) prompt for the current case */
+let originalPrompt = '';
+
 /**
  * turndown service instance for HTML → markdown conversion.
  * Initialized once at startup.
@@ -144,19 +147,18 @@ let turndownService = null;
  */
 async function loadCorpus() {
   try {
-var result = await window.electronAPI.queueNext(
-  CURRENT_USER_ID,
-  activeVertical      || 'all',
-  activeInversionType || 'all'
-);
-if (result.success && result.case && result.case.case_number) {
-  loadCase(result.case.case_number);
-} else if (result.success && !result.case) {
-  console.warn('[nav] Queue exhausted — no more unworked cases.');
-  btnNext.textContent = 'Queue empty';
-  btnNext.disabled = true;
-} else {
-  console.warn('[nav] queue:next returned no case:', result.error);
+    var result = await window.electronAPI.loadCorpus();
+    if (!result.success) {
+      console.error('[corpus] Load failed:', result.error);
+      return;
+    }
+    corpus = result.cases;
+    console.log('[renderer] Loaded ' + corpus.length.toLocaleString() +
+                ' cases from Railway API.');
+    populateVerticalFilter();
+  } catch (err) {
+    console.error('[renderer] Corpus load failed:', err.message);
+  }
 }
 
 /**
@@ -891,10 +893,10 @@ function loadCase(caseNumber) {
     caseIdEl.textContent = 'Case #' + c.case_number + ' — ' + c.vertical;
   }
 
-  var promptTextEl = document.getElementById('prompt-text-box') ||
-                     document.getElementById('prompt-text') ||
-                     document.getElementById('prompt-bar-text');
-  if (promptTextEl) promptTextEl.textContent = c.prompt || '';
+  // Populate the editable prompt textarea and store original for reset
+  originalPrompt = c.prompt || '';
+  var promptTextarea = document.getElementById('prompt-textarea');
+  if (promptTextarea) promptTextarea.value = originalPrompt;
 
   // Prompt bar inline badges
   var badgeType      = document.getElementById('prompt-badge-type');
@@ -1006,8 +1008,12 @@ function initNavigation() {
           activeVertical      || 'all',
           activeInversionType || 'all'
         );
-        if (result.success && result.case_number) {
-          loadCase(result.case_number);
+        if (result.success && result.case && result.case.case_number) {
+          loadCase(result.case.case_number);
+        } else if (result.success && !result.case) {
+          console.warn('[nav] Queue exhausted — no more unworked cases.');
+          btnNext.textContent = 'Queue empty';
+          btnNext.disabled = true;
         } else {
           console.warn('[nav] queue:next returned no case:', result.error);
         }
@@ -1285,9 +1291,13 @@ async function generateStandard(slotId) {
 
   clearPanelSlot('std-panel-body', slotId);
 
+  // Read prompt from the live textarea (may have been edited by the user)
+  var prompt = (document.getElementById('prompt-textarea') || {}).value || currentCase.prompt;
+  prompt = prompt.trim();
+
   try {
     await window.electronAPI.generateStandard({
-      prompt:    currentCase.prompt,
+      prompt:    prompt,
       vertical:  currentCase.vertical,
       variantId: variantId,
       model:     model,
@@ -1346,9 +1356,13 @@ async function generateVai(slotId) {
 
   clearPanelSlot('vai-panel-body', slotId);
 
+  // Read prompt from the live textarea (may have been edited by the user)
+  var prompt = (document.getElementById('prompt-textarea') || {}).value || currentCase.prompt;
+  prompt = prompt.trim();
+
   try {
     await window.electronAPI.generateVai({
-      prompt:    currentCase.prompt,
+      prompt:    prompt,
       caseData:  currentCase,
       intensity: intensity,
       model:     model,
@@ -1449,6 +1463,15 @@ function initRegenButtons() {
   if (btnRegenVai) {
     btnRegenVai.addEventListener('click', function() {
       generateVai('vai-0');
+    });
+  }
+
+  // Wire the prompt reset button
+  var btnResetPrompt = document.getElementById('btn-reset-prompt');
+  if (btnResetPrompt) {
+    btnResetPrompt.addEventListener('click', function() {
+      var ta = document.getElementById('prompt-textarea');
+      if (ta) ta.value = originalPrompt;
     });
   }
 }
@@ -1931,9 +1954,20 @@ function showCortexPopup(result) {
 
   } else {
     // Issues found — show flags and optional override field
-    var flagsHtml = (result.flags || []).map(function(f) {
-      return '<li>' + f + '</li>';
-    }).join('');
+var flagsHtml = (result.flags || []).map(function(f) {
+  if (typeof f === 'object' && f !== null) {
+    var sevClass = f.severity === 'Severe' ? 'badge-red'
+                 : f.severity === 'Moderate' ? 'badge-amber' : 'badge-green';
+    var html = '<li>';
+    html += '<strong>' + (f.inversion_type || '') + '</strong> ';
+    html += (f.description || '') + ' ';
+    if (f.severity) html += '<span class="' + sevClass + '">' + f.severity + '</span>';
+    if (f.location) html += '<br><em style="font-size:11px;color:var(--text-muted,#888)">↳ "' + f.location + '"</em>';
+    html += '</li>';
+    return html;
+  }
+  return '<li>' + f + '</li>';
+}).join('');
 
     var overrideHtml = vaiWasEdited ? [
       '<div class="cortex-override">',
@@ -1946,11 +1980,19 @@ function showCortexPopup(result) {
       '</div>'
     ].join('') : '';
 
+    var suggestionsHtml = (result.suggestions || []).length > 0
+      ? '<div style="margin-top:8px;font-size:12px;">' +
+        '<strong>Suggestions:</strong><ul>' +
+        result.suggestions.map(function(s) { return '<li>' + s + '</li>'; }).join('') +
+        '</ul></div>'
+      : '';
+
     contentHtml = [
       '<div class="cortex-issues">',
       '  <span class="cortex-icon cortex-warn">⚠</span>',
       '  <strong>VAI validation — issues found</strong>',
       '  <ul>' + flagsHtml + '</ul>',
+      suggestionsHtml,
       overrideHtml,
       '</div>'
     ].join('');
