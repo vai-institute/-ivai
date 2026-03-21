@@ -2228,9 +2228,16 @@ var flagsHtml = (result.flags || []).map(function(f) {
     ].join('');
   }
 
-  // Build popup element — positioned over Standard panel
+  // Build popup element — anchored inside the VAI panel
   var popup = document.createElement('div');
   popup.id = 'cortex-popup';
+
+  // Apply result-state border class
+  popup.classList.remove('cortex-pass', 'cortex-fail');
+  if (!result.loading && !result.error) {
+    popup.classList.add(result.has_issues ? 'cortex-fail' : 'cortex-pass');
+  }
+
   popup.innerHTML = [
     '<div class="cortex-popup-inner">',
     '  <div class="cortex-popup-header">',
@@ -2241,14 +2248,8 @@ var flagsHtml = (result.flags || []).map(function(f) {
     '</div>'
   ].join('');
 
-  // Insert popup into the Standard panel body area
-  var stdPanel = document.getElementById('panel-standard');
-  if (stdPanel) {
-    stdPanel.style.position = 'relative';
-    stdPanel.appendChild(popup);
-  } else {
-    document.body.appendChild(popup);
-  }
+  // Insert popup into body — uses position:fixed to center over Standard panel
+  document.body.appendChild(popup);
 
   // Wire close button
   var closeBtn = document.getElementById('btn-cortex-close');
