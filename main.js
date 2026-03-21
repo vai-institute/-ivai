@@ -569,6 +569,10 @@ ipcMain.handle('write-flag', async (_event, flagData) => {
 
 // ── Step 6: Streaming response generation ────────────────────────────────────
 
+// Provider routing — exploration models (OpenAI, Anthropic) are NOT training-eligible.
+// Their outputs must never reach arlaf_training_data.jsonl or arlaf_holdout_data.jsonl.
+// Enforcement: renderer disables role pills and Write Pair when trainingEligible === false.
+
 /**
  * Shared SSE streaming helper for generate-standard and generate-vai.
  * Forwards tokens to the renderer via 'llm-chunk' IPC events.

@@ -1295,6 +1295,11 @@ async function generateStandard(slotId) {
   var prompt = (document.getElementById('prompt-textarea') || {}).value || currentCase.prompt;
   prompt = prompt.trim();
 
+  var provider = model.startsWith('claude-') ? 'Anthropic'
+               : model.startsWith('gpt-')    ? 'OpenAI'
+               : 'Together AI';
+  console.log('[gen] Standard panel → provider: ' + provider + ', model: ' + model);
+
   try {
     await window.electronAPI.generateStandard({
       prompt:    prompt,
@@ -1359,6 +1364,11 @@ async function generateVai(slotId) {
   // Read prompt from the live textarea (may have been edited by the user)
   var prompt = (document.getElementById('prompt-textarea') || {}).value || currentCase.prompt;
   prompt = prompt.trim();
+
+  var provider = model.startsWith('claude-') ? 'Anthropic'
+               : model.startsWith('gpt-')    ? 'OpenAI'
+               : 'Together AI';
+  console.log('[gen] VAI panel → provider: ' + provider + ', model: ' + model);
 
   try {
     await window.electronAPI.generateVai({
@@ -1474,6 +1484,79 @@ function initRegenButtons() {
       if (ta) ta.value = originalPrompt;
     });
   }
+
+  // Wire model selector change → enforce training eligibility
+  var stdModelSelect = document.getElementById('std-model-select');
+  var vaiModelSelect = document.getElementById('vai-model-select');
+  if (stdModelSelect) {
+    stdModelSelect.addEventListener('change', function() {
+      console.log('[model] Standard panel → ' + stdModelSelect.value);
+      enforceTrainingEligibility('standard', stdModelSelect.value);
+    });
+  }
+  if (vaiModelSelect) {
+    vaiModelSelect.addEventListener('change', function() {
+      console.log('[model] VAI panel → ' + vaiModelSelect.value);
+      enforceTrainingEligibility('vai', vaiModelSelect.value);
+    });
+  }
+}
+
+// ─── Exploration mode enforcement ─────────────────────────────────────────────
+// Models that are NOT training-eligible.  Keyed by model ID.
+var EXPLORATION_MODELS = {
+  'gpt-4o': true,
+  'gpt-4o-mini': true,
+  'claude-sonnet-4-6': true,
+  'claude-haiku-4-5-20251001': true
+};
+
+/**
+ * Disables role pills, Write Pair button, and Write Additional Pair button
+ * for the given panel when the selected model is not training-eligible.
+ * Exploration-only models (OpenAI, Anthropic) must never produce DPO training data.
+ * @param {string} panelId - 'standard' or 'vai'
+ * @param {string} modelId - model ID string
+ */
+function enforceTrainingEligibility(panelId, modelId) {
+  var panel = document.getElementById('panel-' + panelId);
+  if (!panel) return;
+
+  var isExploration = !!EXPLORATION_MODELS[modelId];
+
+  if (isExploration) {
+    panel.classList.add('exploration-mode');
+    // Add banner if not already present
+    if (!panel.querySelector('.exploration-banner')) {
+      var banner = document.createElement('div');
+      banner.className = 'exploration-banner';
+      banner.textContent = '\u26A0 Exploration only \u2014 outputs cannot be used as training data';
+      var hdr = panel.querySelector('.panel-hdr');
+      if (hdr && hdr.nextSibling) {
+        hdr.parentNode.insertBefore(banner, hdr.nextSibling);
+      }
+    }
+  } else {
+    panel.classList.remove('exploration-mode');
+    var existingBanner = panel.querySelector('.exploration-banner');
+    if (existingBanner) existingBanner.remove();
+  }
+
+  // Disable Write Pair if EITHER panel is exploration-mode
+  var stdExploration = document.getElementById('panel-standard')
+                        && document.getElementById('panel-standard').classList.contains('exploration-mode');
+  var vaiExploration = document.getElementById('panel-vai')
+                        && document.getElementById('panel-vai').classList.contains('exploration-mode');
+  var btnWritePair   = document.getElementById('btn-write-pair');
+  var btnWriteAdd    = document.getElementById('btn-write-additional');
+
+  if (stdExploration || vaiExploration) {
+    if (btnWritePair) btnWritePair.disabled = true;
+    if (btnWriteAdd)  btnWriteAdd.disabled  = true;
+  } else {
+    // Re-enable via normal logic
+    updateWritePairEnabled();
+  }
 }
 
 // ─── Step 7: Role selection ───────────────────────────────────────────────────
@@ -1534,6 +1617,15 @@ function getSlotText(slotId) {
 function updateWritePairEnabled() {
   var btn = document.getElementById('btn-write-pair');
   if (!btn) return;
+
+  // Block Write Pair when either panel is in exploration mode
+  var stdPanel = document.getElementById('panel-standard');
+  var vaiPanel = document.getElementById('panel-vai');
+  if ((stdPanel && stdPanel.classList.contains('exploration-mode')) ||
+      (vaiPanel && vaiPanel.classList.contains('exploration-mode'))) {
+    btn.disabled = true;
+    return;
+  }
 
   var bothAssigned = preferredSlotId    !== null &&
                      nonPreferredSlotId !== null &&

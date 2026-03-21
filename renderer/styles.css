@@ -1551,3 +1551,18 @@ body {
   background: var(--border);
   margin: 14px 0;
 }
+
+/* Exploration mode panel state */
+.exploration-banner {
+  background: #fff3cd;
+  color: #856404;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-bottom: 1px solid #ffc107;
+  letter-spacing: 0.02em;
+}
+.panel.exploration-mode .pill-role {
+  opacity: 0.35;
+  pointer-events: none;
+  cursor: not-allowed;
+}
