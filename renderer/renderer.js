@@ -960,6 +960,12 @@ function loadCase(caseNumber) {
   // Cancel any in-flight streams from the previous case before loading new one
   window.electronAPI.cancelStream();
 
+  // Clear response panels so stale responses don't persist between cases
+  var stdBody = document.getElementById('std-panel-body');
+  var vaiBody = document.getElementById('vai-panel-body');
+  if (stdBody) stdBody.innerHTML = '';
+  if (vaiBody) vaiBody.innerHTML = '';
+
   // Reset role selections when navigating to a new case
   clearRoleSelections();
 
@@ -1044,14 +1050,11 @@ function loadCase(caseNumber) {
   // Step 8: Set right rail curation defaults from case metadata
   setCurationDefaults(c);
 
-  // Step 6: Auto-generate both panels when a new case loads (spec Section 7.6)
-  // Set intensity selector default from case data before firing VAI call
+  // Set intensity selector default from case data
   var intensitySelect = document.getElementById('vai-intensity-select');
   if (intensitySelect && c.appropriate_intensity) {
     intensitySelect.value = c.appropriate_intensity;
   }
-  generateStandard('std-0');
-  generateVai('vai-0');
 }
 
 /**
@@ -1674,6 +1677,15 @@ function initRegenButtons() {
     btnResetPrompt.addEventListener('click', function() {
       var ta = document.getElementById('prompt-textarea');
       if (ta) ta.value = originalPrompt;
+    });
+  }
+
+  // Wire the Submit button — fires both Standard and VAI generation
+  var btnSubmit = document.getElementById('btn-submit-prompt');
+  if (btnSubmit) {
+    btnSubmit.addEventListener('click', function() {
+      generateStandard('std-0');
+      generateVai('vai-0');
     });
   }
 
