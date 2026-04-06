@@ -53,7 +53,9 @@ let activeInversionType = '';
 const CURRENT_USER_ID = 'peter_d';
 
 /** Loaded API keys from config. Populated by initApiKeys(). @type {Object} */
-let apiKeys = { together_ai: '', openai: '', anthropic: '' };
+let apiKeys = { together_ai: '', openai: '', anthropic: '', google: '' };
+/** Whether initApiKeys() has completed at least once. */
+let _apiKeysReady = false;
 
 /**
  * Tracks streaming state for each panel slot.
@@ -351,6 +353,7 @@ async function openSettingsModal() {
     document.getElementById('key-together').value  = keys.together_ai;
     document.getElementById('key-openai').value    = keys.openai;
     document.getElementById('key-anthropic').value = keys.anthropic;
+    document.getElementById('key-google').value    = keys.google || '';
 
     // Populate Cortex selectors from stored config
     var cortexEndpointSelect = document.getElementById('cortex-endpoint-select');
@@ -405,6 +408,7 @@ async function saveApiKeys() {
     together_ai:     document.getElementById('key-together').value.trim(),
     openai:          document.getElementById('key-openai').value.trim(),
     anthropic:       document.getElementById('key-anthropic').value.trim(),
+    google:          document.getElementById('key-google').value.trim(),
     cortex_endpoint: cortexEndpoint,
     cortex_model:    cortexModel
   };
@@ -414,9 +418,8 @@ async function saveApiKeys() {
   try {
     var result = await window.electronAPI.writeApiKeys(keys);
     if (result.ok) {
-      // Update apiKeys in memory after save
-      apiKeys.cortex_endpoint = cortexEndpoint;
-      apiKeys.cortex_model    = cortexModel;
+      // Refresh all keys in memory from disk
+      await initApiKeys();
       statusEl.textContent = '✓ Settings saved to config/api_keys.json';
       statusEl.className = 'success';
       // Auto-close after brief confirmation
@@ -439,6 +442,14 @@ async function saveApiKeys() {
  * @returns {void}
  */
 function initSettingsModal() {
+  // Restart button
+  var restartBtn = document.getElementById('btn-restart');
+  if (restartBtn) {
+    restartBtn.addEventListener('click', function() {
+      window.electronAPI.restartApp();
+    });
+  }
+
   // Open
   var gearBtn = document.getElementById('btn-settings');
   if (gearBtn) gearBtn.addEventListener('click', openSettingsModal);
@@ -715,7 +726,8 @@ function initChipRows() {
     chip.addEventListener('click', function() {
       confChips.forEach(function(c) { c.classList.remove('active'); });
       chip.classList.add('active');
-      // TODO Step 9: update Write Pair enabled state
+      // Step 8: confidence selection gates Write Pair
+      updateWritePairEnabled();
     });
   });
 
@@ -727,6 +739,107 @@ function initChipRows() {
       chip.classList.add('active');
     });
   });
+}
+
+// ─── Step 8: Right Rail Curation Defaults ─────────────────────────────────────
+
+/**
+ * Sets right rail curation controls to their default values based on the
+ * current case's metadata. Called from loadCase() on every case navigation.
+ *
+ * Default logic (spec Section 9):
+ *   - Pause-and-Ask toggle: ON if appropriate_intensity is Balanced or Direct
+ *   - Identity Declaration toggle: matches identity_language field from corpus
+ *   - Response Mode: Boundary/Silent if boundary_condition true;
+ *       Humanizing if intensity=Light AND subtlety=Subtle; else Standard VAI
+ *   - Confidence chips: cleared (CVA must select before Write Pair enables)
+ *   - Dataset Split: defaults to Train
+ *   - Preferred editor + hint line: cleared (fresh for new case)
+ *   - CVA notes: cleared
+ *   - Split ratio note: updated from session progress
+ *
+ * @param {object} caseData - Corpus case object with metadata fields
+ * @returns {void}
+ */
+function setCurationDefaults(caseData) {
+  // ── Protocol flags (spec Section 9.2) ──────────────────────────────────────
+
+  // Pause-and-Ask: ON when intensity is Balanced or Direct
+  var flagPna = document.getElementById('flag-pna');
+  if (flagPna) {
+    var intensity = caseData.appropriate_intensity || '';
+    flagPna.checked = (intensity === 'Balanced' || intensity === 'Direct');
+  }
+
+  // Identity Declaration: matches identity_language field from case
+  var flagIdentity = document.getElementById('flag-identity');
+  if (flagIdentity) {
+    flagIdentity.checked = !!caseData.identity_language;
+  }
+
+  // ── Response mode chips (spec Section 9.3) ─────────────────────────────────
+
+  var modeChips = document.querySelectorAll('.mode-chip');
+  var defaultMode = 'standard-vai';
+
+  if (caseData.boundary_condition === true) {
+    // Boundary condition cases always use Boundary / Silent mode
+    defaultMode = 'boundary';
+  } else if (caseData.appropriate_intensity === 'Light' &&
+             caseData.subtlety === 'Subtle') {
+    // Light intensity + Subtle subtlety → Humanizing pipeline
+    defaultMode = 'humanizing';
+  }
+
+  modeChips.forEach(function(chip) {
+    if (chip.getAttribute('data-mode') === defaultMode) {
+      chip.classList.add('active');
+    } else {
+      chip.classList.remove('active');
+    }
+  });
+
+  // ── Confidence rating (spec Section 9.5) ───────────────────────────────────
+  // Clear all — CVA must explicitly select before Write Pair enables
+  document.querySelectorAll('[data-confidence]').forEach(function(chip) {
+    chip.classList.remove('active');
+  });
+
+  // ── Dataset split (spec Section 9.6) ───────────────────────────────────────
+  // Default to Train
+  document.querySelectorAll('[data-split]').forEach(function(chip) {
+    if (chip.getAttribute('data-split') === 'train') {
+      chip.classList.add('active');
+    } else {
+      chip.classList.remove('active');
+    }
+  });
+
+  // Update split ratio note from session progress
+  var splitNote = document.getElementById('split-note');
+  if (splitNote && sessionProgress) {
+    var t = sessionProgress.pairs_train   || 0;
+    var h = sessionProgress.pairs_holdout || 0;
+    var total = t + h;
+    var pctTrain   = total > 0 ? Math.round((t / total) * 100) : 0;
+    var pctHoldout = total > 0 ? Math.round((h / total) * 100) : 0;
+    splitNote.textContent = 'Current split: ' + t + ' train / ' + h +
+      ' held-out (' + pctTrain + '% / ' + pctHoldout + '%)';
+  }
+
+  // ── Preferred editor + hint (spec Section 9.4) ─────────────────────────────
+  // Cleared by clearRoleSelections() in loadCase(), but ensure clean state
+  var editor   = document.getElementById('preferred-editor');
+  var hintLine = document.getElementById('hint-line');
+  if (editor)   editor.value = '';
+  if (hintLine) hintLine.textContent = '';
+
+  // ── CVA notes (spec Section 9.7) ───────────────────────────────────────────
+  var cvaNotes = document.getElementById('cva-notes');
+  if (cvaNotes) cvaNotes.value = '';
+
+  // ── Clear validation hint ──────────────────────────────────────────────────
+  showValidationHint('');
 }
 
 // ─── Step 5: Case display and navigation ──────────────────────────────────────
@@ -928,6 +1041,9 @@ function loadCase(caseNumber) {
   updateNavButtons();
   updateProgress();
 
+  // Step 8: Set right rail curation defaults from case metadata
+  setCurationDefaults(c);
+
   // Step 6: Auto-generate both panels when a new case loads (spec Section 7.6)
   // Set intensity selector default from case data before firing VAI call
   var intensitySelect = document.getElementById('vai-intensity-select');
@@ -1125,6 +1241,7 @@ function initFilters() {
 async function initApiKeys() {
   try {
     apiKeys = await window.electronAPI.readApiKeys();
+    _apiKeysReady = true;
   } catch (err) {
     console.error('[apiKeys] Failed to load:', err.message);
   }
@@ -1257,15 +1374,22 @@ function stripHighlights(html) {
 
 /**
  * Returns the appropriate API key for a given model ID.
- * Infers provider from model ID prefix.
+ * Looks up the provider field in AVAILABLE_MODELS from prompts.js,
+ * then returns the corresponding key from the apiKeys config.
  *
  * @param {string} modelId - Model ID string
  * @returns {string} API key, or empty string if not configured
  */
 function getApiKeyForModel(modelId) {
-  if (modelId.startsWith('claude-'))  return apiKeys.anthropic  || '';
-  if (modelId.startsWith('gpt-'))     return apiKeys.openai      || '';
-  return apiKeys.together_ai || ''; // Together AI (Llama, Mixtral, etc.)
+  // Find provider from AVAILABLE_MODELS list populated in the model dropdowns
+  var select = document.getElementById('std-model-select');
+  var option = select ? select.querySelector('option[value="' + modelId + '"]') : null;
+  var provider = option ? option.getAttribute('data-provider') : '';
+
+  if (provider === 'anthropic') return apiKeys.anthropic   || '';
+  if (provider === 'openai')    return apiKeys.openai       || '';
+  if (provider === 'google')    return apiKeys.google       || '';
+  return apiKeys.together_ai || '';
 }
 
 /**
@@ -1324,6 +1448,12 @@ function appendChunk(bodyElementId, chunk) {
 async function generateStandard(slotId) {
   slotId = slotId || 'std-0';
 
+  if (!_apiKeysReady) {
+    var body = document.getElementById('std-panel-body');
+    if (body) body.innerHTML = '<div class="response-error">Initializing…</div>';
+    return;
+  }
+
   var currentCase = corpus[currentIndex];
   if (!currentCase) {
     console.warn('[gen] No current case — cannot generate.');
@@ -1332,7 +1462,7 @@ async function generateStandard(slotId) {
 
   var modelSelect   = document.getElementById('std-model-select');
   var variantSelect = document.getElementById('std-variant-select');
-  var model         = modelSelect   ? modelSelect.value   : 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8';
+  var model         = modelSelect   ? modelSelect.value   : 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
   var variantId     = variantSelect ? variantSelect.value : 'A';
   var apiKey        = getApiKeyForModel(model);
 
@@ -1350,9 +1480,8 @@ async function generateStandard(slotId) {
   var prompt = (document.getElementById('prompt-textarea') || {}).value || currentCase.prompt;
   prompt = prompt.trim();
 
-  var provider = model.startsWith('claude-') ? 'Anthropic'
-               : model.startsWith('gpt-')    ? 'OpenAI'
-               : 'Together AI';
+  var stdOpt = document.querySelector('#std-model-select option[value="' + model + '"]');
+  var provider = stdOpt ? stdOpt.getAttribute('data-provider') : 'together';
   console.log('[gen] Standard panel → provider: ' + provider + ', model: ' + model);
 
   try {
@@ -1380,6 +1509,12 @@ async function generateStandard(slotId) {
 async function generateVai(slotId) {
   slotId = slotId || 'vai-0';
 
+  if (!_apiKeysReady) {
+    var body = document.getElementById('vai-panel-body');
+    if (body) body.innerHTML = '<div class="response-error">Initializing…</div>';
+    return;
+  }
+
   // Reset edit state on regeneration
   exitVaiEditMode();
   vaiWasEdited = false;
@@ -1402,7 +1537,7 @@ async function generateVai(slotId) {
 
   var modelSelect     = document.getElementById('vai-model-select');
   var intensitySelect = document.getElementById('vai-intensity-select');
-  var model           = modelSelect     ? modelSelect.value     : 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8';
+  var model           = modelSelect     ? modelSelect.value     : 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
   var intensity       = intensitySelect ? intensitySelect.value : currentCase.appropriate_intensity || 'Balanced';
   var apiKey          = getApiKeyForModel(model);
 
@@ -1420,10 +1555,12 @@ async function generateVai(slotId) {
   var prompt = (document.getElementById('prompt-textarea') || {}).value || currentCase.prompt;
   prompt = prompt.trim();
 
-  var provider = model.startsWith('claude-') ? 'Anthropic'
-               : model.startsWith('gpt-')    ? 'OpenAI'
-               : 'Together AI';
-  console.log('[gen] VAI panel → provider: ' + provider + ', model: ' + model);
+  // Derive provider from the active dropdown option's data-provider attribute
+  var vaiSelect   = document.getElementById('vai-model-select');
+  var vaiSelected = vaiSelect ? vaiSelect.options[vaiSelect.selectedIndex] : null;
+  var provider    = vaiSelected ? (vaiSelected.getAttribute('data-provider') || 'together') : 'together';
+  var providerLabel = { together: 'Together AI', openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google' }[provider] || provider;
+  console.log('[gen] VAI panel → provider: ' + providerLabel + ', model: ' + model);
 
   try {
     await window.electronAPI.generateVai({
@@ -1559,11 +1696,13 @@ function initRegenButtons() {
 
 // ─── Exploration mode enforcement ─────────────────────────────────────────────
 // Models that are NOT training-eligible.  Keyed by model ID.
+// Outputs from these models must NEVER enter DPO training data.
 var EXPLORATION_MODELS = {
-  'gpt-4o': true,
-  'gpt-4o-mini': true,
+  'gpt-5.4': true,
+  'gpt-5.4-mini': true,
+  'claude-opus-4-6': true,
   'claude-sonnet-4-6': true,
-  'claude-haiku-4-5-20251001': true
+  'gemini-2.5-pro': true
 };
 
 /**
@@ -1662,10 +1801,12 @@ function getSlotText(slotId) {
 }
 
 /**
- * Enables or disables the Write Pair button based on whether
- * both a preferred and non-preferred slot have been assigned.
- * Also requires a confidence chip to be selected (Step 9 fully
- * implements validation — this is the role-selection gate only).
+ * Enables or disables the Write Pair button based on multiple gates:
+ *   1. Neither panel in exploration mode (non-eligible model)
+ *   2. Both preferred and non-preferred slots assigned to different slots
+ *   3. Confidence chip selected (Step 8)
+ *   4. Edited VAI responses validated via Cortex (Step 7B)
+ *   5. Override explanation present if Cortex found issues (Step 7B)
  *
  * @returns {void}
  */
@@ -1688,6 +1829,14 @@ function updateWritePairEnabled() {
 
   if (!bothAssigned) {
     btn.disabled = true;
+    return;
+  }
+
+  // Step 8: Require a confidence chip selection before enabling Write Pair
+  var hasConfidence = document.querySelector('[data-confidence].active') !== null;
+  if (!hasConfidence) {
+    btn.disabled = true;
+    showValidationHint('Select a confidence rating before writing.');
     return;
   }
 

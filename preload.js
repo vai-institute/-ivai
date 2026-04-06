@@ -43,6 +43,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   getElectronVersion: () => process.versions.electron,
 
+  /**
+   * Relaunches the entire Electron app (topbar restart button).
+   * @returns {Promise<void>}
+   */
+  restartApp: () => ipcRenderer.invoke('app:restart'),
+
   // ── User management ─────────────────────────────────────────────────────────
 
   /**

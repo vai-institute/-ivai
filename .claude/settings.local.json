@@ -11,7 +11,13 @@
       "Bash(npx electron:*)",
       "Bash(node -e \"console.log\\(''quill:'', require\\(''quill/package.json''\\).version\\); console.log\\(''turndown:'', require\\(''turndown/package.json''\\).version\\);\")",
       "Bash(ls C:/projects/ivai-cva-tool/node_modules/marked/lib/marked.*)",
-      "Bash(node -e \":*)"
+      "Bash(node -e \":*)",
+      "Bash(git:*)",
+      "Bash(node --check preload.js)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(node --check renderer/renderer.js)",
+      "Bash(node -e \"require\\('./package.json'\\)\")",
+      "Bash(node --check main.js)"
     ]
   }
 }

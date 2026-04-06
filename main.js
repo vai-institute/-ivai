@@ -64,6 +64,9 @@ const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
 /** Anthropic endpoint */
 const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
 
+/** Google Gemini endpoint — uses generateContent with SSE streaming */
+const GOOGLE_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
+
 /** Absolute path to the API keys config file. Never committed to git. */
 const API_KEYS_PATH = path.join(__dirname, 'config', 'api_keys.json');
 
@@ -185,6 +188,16 @@ app.on('window-all-closed', () => {
  * @param {string} userId - CVA user ID (e.g. 'peter_d')
  * @returns {{ success: boolean }}
  */
+// ── App restart ───────────────────────────────────────────────────────────────
+/**
+ * Relaunches the Electron app. Triggered from the topbar restart button.
+ * @returns {void}
+ */
+ipcMain.handle('app:restart', () => {
+  app.relaunch();
+  app.exit(0);
+});
+
 ipcMain.handle('user:set-active', (_event, userId) => {
   _activeUserId = userId || 'peter_d';
   console.log(`[user] Active user set to: ${_activeUserId}`);
@@ -569,18 +582,31 @@ ipcMain.handle('write-flag', async (_event, flagData) => {
 
 // ── Step 6: Streaming response generation ────────────────────────────────────
 
-// Provider routing — exploration models (OpenAI, Anthropic) are NOT training-eligible.
+// Provider routing — exploration models (OpenAI, Anthropic, Google) are NOT training-eligible.
 // Their outputs must never reach arlaf_training_data.jsonl or arlaf_holdout_data.jsonl.
 // Enforcement: renderer disables role pills and Write Pair when trainingEligible === false.
+
+/**
+ * Returns the provider string for a given model ID by looking it up in AVAILABLE_MODELS.
+ * Falls back to 'together' for any unknown model (safe default — Together AI compatible).
+ *
+ * @param {string} modelId - Model ID string from the dropdown
+ * @returns {string} Provider key: 'together', 'openai', 'anthropic', or 'google'
+ */
+function getProvider(modelId) {
+  const model = AVAILABLE_MODELS.find(m => m.id === modelId);
+  return model ? model.provider : 'together';
+}
 
 /**
  * Shared SSE streaming helper for generate-standard and generate-vai.
  * Forwards tokens to the renderer via 'llm-chunk' IPC events.
  *
- * Provider is inferred from model ID:
- *   - 'claude-' prefix → Anthropic Messages API
- *   - 'gpt-' prefix    → OpenAI Chat Completions
- *   - all others        → Together AI (OpenAI-compatible)
+ * Provider is determined by the model's provider field in AVAILABLE_MODELS:
+ *   - 'anthropic' → Anthropic Messages API
+ *   - 'openai'    → OpenAI Chat Completions (o-series and GPT models)
+ *   - 'google'    → Google Gemini generateContent with SSE streaming
+ *   - 'together'  → Together AI (OpenAI-compatible)
  *
  * @param {Electron.IpcMainInvokeEvent} event
  * @param {Object} opts
@@ -596,10 +622,13 @@ ipcMain.handle('write-flag', async (_event, flagData) => {
 async function streamToPanel(event, opts) {
   const { slotId, apiKey, model, systemPrompt, userPrompt, temperature, maxTokens } = opts;
 
-  const isAnthropic = model.startsWith('claude-');
-  const isOpenAI    = model.startsWith('gpt-');
+  const provider    = getProvider(model);
+  const isAnthropic = provider === 'anthropic';
+  const isOpenAI    = provider === 'openai';
+  const isGoogle    = provider === 'google';
   const endpoint    = isAnthropic ? ANTHROPIC_ENDPOINT
                     : isOpenAI    ? OPENAI_ENDPOINT
+                    : isGoogle    ? `${GOOGLE_ENDPOINT}/${model}:streamGenerateContent?alt=sse&key=${apiKey}`
                     : TOGETHER_ENDPOINT;
 
   const controller = new AbortController();
@@ -624,11 +653,34 @@ async function streamToPanel(event, opts) {
         temperature,
         stream: true
       };
+    } else if (isGoogle) {
+      // Google Gemini uses a different request format.
+      // API key is in the URL (set above), not in headers.
+      headers = {
+        'Content-Type': 'application/json'
+      };
+      body = {
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+        generationConfig: {
+          temperature,
+          // Gemini 2.5 Pro requires thinking mode (cannot be disabled).
+          // Thinking tokens count against maxOutputTokens, so we multiply
+          // the requested budget to leave room for the visible response.
+          // Thinking tokens are filtered out in the SSE parser (thought:true parts skipped).
+          maxOutputTokens: maxTokens * 10
+        }
+      };
     } else {
+      // OpenAI and Together AI use the same OpenAI-compatible format.
+      // OpenAI o-series models require 'max_completion_tokens' instead of 'max_tokens'.
       headers = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`
       };
+      // OpenAI newer models (GPT-5.x+) use 'max_completion_tokens';
+      // Together AI uses the legacy 'max_tokens'. Both support temperature.
+      const tokenKey = isOpenAI ? 'max_completion_tokens' : 'max_tokens';
       body = {
         model,
         messages: [
@@ -636,7 +688,7 @@ async function streamToPanel(event, opts) {
           { role: 'user',   content: userPrompt }
         ],
         temperature,
-        max_tokens: maxTokens,
+        [tokenKey]: maxTokens,
         stream: true
       };
     }
@@ -680,11 +732,24 @@ async function streamToPanel(event, opts) {
           let chunkText = '';
 
           if (isAnthropic) {
+            // Anthropic SSE: content_block_delta with text_delta
             if (parsed.type === 'content_block_delta' &&
                 parsed.delta?.type === 'text_delta') {
               chunkText = parsed.delta.text;
             }
+          } else if (isGoogle) {
+            // Google Gemini SSE: candidates[0].content.parts[].text
+            // Skip parts with thought:true (thinking-mode internal reasoning).
+            // Concatenate all visible text parts in the chunk.
+            const parts = parsed.candidates?.[0]?.content?.parts;
+            if (parts) {
+              for (const part of parts) {
+                if (part.thought) continue;   // skip thinking tokens
+                if (part.text) chunkText += part.text;
+              }
+            }
           } else {
+            // OpenAI / Together AI SSE: choices[0].delta.content
             const choices = parsed.choices;
             if (!choices || choices.length === 0) continue;
             const delta = choices[0].delta;
@@ -898,6 +963,7 @@ ipcMain.handle('config:read-keys', () => {
       together_ai:     data.together_ai     || '',
       openai:          data.openai          || '',
       anthropic:       data.anthropic       || '',
+      google:          data.google          || '',
       cortex_endpoint: data.cortex_endpoint || 'railway',
       cortex_model:    data.cortex_model    || 'mistralai/Mistral-Small-24B-Instruct-2501'
     };
@@ -920,6 +986,7 @@ ipcMain.handle('config:write-keys', (_event, keys) => {
       together_ai:     keys.together_ai     || '',
       openai:          keys.openai          || '',
       anthropic:       keys.anthropic       || '',
+      google:          keys.google          || '',
       cortex_endpoint: keys.cortex_endpoint || 'railway',
       cortex_model:    keys.cortex_model    || 'mistralai/Mistral-Small-24B-Instruct-2501'
     };

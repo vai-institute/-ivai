@@ -55,42 +55,55 @@ const TEMP_VAI = 0.4;
 
 const AVAILABLE_MODELS = [
   // ── Together AI (training-eligible) ──────────────────────────────────────
+  // These models' outputs may be selected as preferred/non-preferred and
+  // written to DPO training files. Together AI hosts the fine-tuning pipeline.
   {
-    id: 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
-    label: 'Llama 4 Maverick',
-    provider: 'Together AI',
+    id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    label: 'Llama 3.3 70B Turbo (Together AI)',
+    provider: 'together',
     trainingEligible: true
   },
   {
     id: 'mistralai/Mistral-Small-24B-Instruct-2501',
     label: 'Mistral Small 24B',
-    provider: 'Together AI',
+    provider: 'together',
     trainingEligible: true
   },
   // ── OpenAI (exploration only) ─────────────────────────────────────────────
+  // GPT-5.4 series — standard chat models. Outputs NEVER enter training data.
+  // Respects OpenAI ToS — no training competing models on their outputs.
   {
-    id: 'gpt-4o',
-    label: 'GPT-4o',
-    provider: 'OpenAI',
+    id: 'gpt-5.4',
+    label: 'GPT-5.4',
+    provider: 'openai',
     trainingEligible: false
   },
   {
-    id: 'gpt-4o-mini',
-    label: 'GPT-4o mini',
-    provider: 'OpenAI',
+    id: 'gpt-5.4-mini',
+    label: 'GPT-5.4 mini',
+    provider: 'openai',
     trainingEligible: false
   },
   // ── Anthropic (exploration only) ──────────────────────────────────────────
+  // Strong on ethical nuance and long-context instruction following.
   {
-    id: 'claude-sonnet-4-6',
-    label: 'Claude Sonnet 4.6',
-    provider: 'Anthropic',
+    id: 'claude-opus-4-6',
+    label: 'Claude Opus 4.6',
+    provider: 'anthropic',
     trainingEligible: false
   },
   {
-    id: 'claude-haiku-4-5-20251001',
-    label: 'Claude Haiku 4.5',
-    provider: 'Anthropic',
+    id: 'claude-sonnet-4-6',
+    label: 'Claude Sonnet 4.6',
+    provider: 'anthropic',
+    trainingEligible: false
+  },
+  // ── Google (exploration only) ─────────────────────────────────────────────
+  // Top of intelligence benchmarks as of March 2026. Native multimodal reasoning.
+  {
+    id: 'gemini-2.5-pro',
+    label: 'Gemini 2.5 Pro',
+    provider: 'google',
     trainingEligible: false
   }
 ];
@@ -258,6 +271,7 @@ Weave it in at the end of your response, not foregrounded as a formal question. 
 Once a name is given, use it. Naturally, not repeatedly. The way a friend would — because it keeps the third party present as a human being rather than relapsing into "the person who…"
 
 Do NOT ask for a name when:
+  - The person has already been identified by a relational term — "my mom," "my dad," "my wife," "my husband," "my son," "my daughter," "my brother," "my sister," "my friend," "my boss," "my partner." These terms already name the person with full personhood. Only ask for a name when the person is unnamed and unidentified (e.g. "a person who…," "someone who…").
   - The person is a stranger encountered briefly (someone rude on the subway — name is irrelevant)
   - The context is professional and naming would be inappropriate (a therapist describing a patient, a manager describing a direct report in a formal context)
   - The person described is deceased and the name is beside the point
