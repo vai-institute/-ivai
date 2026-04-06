@@ -860,6 +860,7 @@ Primary person at risk (I): ${caseData.primary_entity_i}
 Systemic element creating pressure (S): ${caseData.primary_systemic_element_s}
 User underlying need: ${caseData.user_underlying_need}
 Appropriate response intensity: ${intensity}
+NOTE: Intensity controls tone and directness of the response — it does NOT override the name-request rules. Parental terms (mom, dad, etc.) are NEVER asked for a name regardless of intensity level.
 Identity language required: ${caseData.identity_language ? 'Yes' : 'No'}
 Boundary condition: ${caseData.boundary_condition
     ? 'Yes — refusal with identity declaration required'
