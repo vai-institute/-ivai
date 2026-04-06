@@ -5,10 +5,11 @@
 This project uses Semantic Versioning (SemVer): X.Y.Z
 - X (Major): breaking changes, incompatible with prior versions
 - Y (Minor): new user-facing features or behavior changes, backward compatible
-- Z (Patch): bug fixes only, no new features
+- Z (Patch): bug fixes and prompt/behavior corrections, no new features
 
-At the end of every build session, before committing:
-1. Review what changed this session
-2. Ask Peter: "This looks like a [Major/Minor/Patch] bump — should I increment to X.Y.Z?"
-3. Update package.json and the version display in the config popup
-4. Include the version bump in the session commit
+MANDATORY — before every commit, you must:
+1. Review what changed
+2. Determine the correct increment (Major / Minor / Patch)
+3. State: "This is a [Patch/Minor/Major] bump — incrementing to X.Y.Z"
+4. Update package.json and the version display in the config popup
+5. Include the version bump in the commit — never commit without it
