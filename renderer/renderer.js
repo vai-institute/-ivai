@@ -2906,9 +2906,10 @@ function initActionButtons() {
   }
 
   // ── Flag ──────────────────────────────────────────────────────────────────
-  // POST /flags does NOT release from _in_flight — flagged cases stay claimed
-  // on the backend for review. This is intentional: the case remains reserved
-  // so a reviewer can inspect it without another CVA pulling it from the queue.
+  // Flag-and-release: POST /flags records the flag AND releases the case from
+  // _in_flight so it returns to the queue pool. No cases are permanently
+  // stranded. The flag record is preserved for future reviewer processing
+  // (see renderer/review.js TODO).
   //
   // When an edited VAI response is flagged by Cortex (has_issues && vaiWasEdited),
   // the flag carries the full pair context as JSON in cva_notes with
@@ -2946,8 +2947,7 @@ function initActionButtons() {
 
         if (result.success) {
           sessionProgress.flagged = (sessionProgress.flagged || 0) + 1;
-          // Do NOT call queueRelease — flagged cases stay in _in_flight
-          // intentionally (see comment above)
+          // Backend now releases from _in_flight on flag (flag-and-release)
           currentQueuedCaseNumber = null;
           await saveSession();
           updateProgress();

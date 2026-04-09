@@ -20,6 +20,11 @@
 
 'use strict';
 
+// TODO: Implement reviewer queue. This file must display flagged cases (with their
+// Cortex analysis) and allow a human reviewer to approve, rewrite, or permanently
+// discard each one. Until this is implemented, Flag uses flag-and-release behavior
+// (case returned to queue after flagging).
+//
 // TODO Step 19: Implement review queue loader, decision panel, preferred
 //               response editor (amber border), flag override controls,
 //               reviewer notes, and four action buttons.

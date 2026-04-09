@@ -848,6 +848,12 @@ async def submit_flag(
         with open(FLAGS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
+    # Flag-and-release: return the case to the queue pool so it is not
+    # permanently stranded in _in_flight. The flag record is preserved for
+    # future reviewer processing (see renderer/review.js TODO).
+    with _queue_lock:
+        _in_flight.discard(flag.case_number)
+
     _write_audit(
         user_id=user["_user_id"],
         action="case_flagged",
