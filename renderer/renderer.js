@@ -2644,7 +2644,7 @@ function assemblePairPayload() {
     inversion_severity:    c.inversion_severity,
     appropriate_intensity: c.appropriate_intensity,
     identity_language:     c.identity_language,
-    // data_classification: not yet in corpus — defaults to "general" on backend
+    data_classification:   c.data_classification || 'general',
     // ferpa_consent: not yet in corpus — defaults to false on backend
 
     // Curation controls
