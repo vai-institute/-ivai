@@ -920,7 +920,7 @@ ipcMain.handle('cortex:review', async (_event, params) => {
   try {
     // Read configured Cortex model from api_keys.json so the backend uses
     // the user's chosen model instead of its hardcoded default.
-    let cortexModel = 'mistralai/Mistral-Small-24B-Instruct-2501';
+    let cortexModel = 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
     try {
       const keys = JSON.parse(fs.readFileSync(API_KEYS_PATH, 'utf8'));
       if (keys.cortex_model) cortexModel = keys.cortex_model;
@@ -983,7 +983,7 @@ ipcMain.handle('config:read-keys', () => {
     openai:           '',
     anthropic:        '',
     cortex_endpoint:  'railway',
-    cortex_model:     'mistralai/Mistral-Small-24B-Instruct-2501'
+    cortex_model:     'meta-llama/Llama-3.3-70B-Instruct-Turbo'
   };
   try {
     if (!fs.existsSync(API_KEYS_PATH)) return defaults;
@@ -994,7 +994,7 @@ ipcMain.handle('config:read-keys', () => {
       anthropic:       data.anthropic       || '',
       google:          data.google          || '',
       cortex_endpoint: data.cortex_endpoint || 'railway',
-      cortex_model:    data.cortex_model    || 'mistralai/Mistral-Small-24B-Instruct-2501'
+      cortex_model:    data.cortex_model    || 'meta-llama/Llama-3.3-70B-Instruct-Turbo'
     };
   } catch (err) {
     console.warn('[config] Could not read api_keys.json:', err.message);
@@ -1017,7 +1017,7 @@ ipcMain.handle('config:write-keys', (_event, keys) => {
       anthropic:       keys.anthropic       || '',
       google:          keys.google          || '',
       cortex_endpoint: keys.cortex_endpoint || 'railway',
-      cortex_model:    keys.cortex_model    || 'mistralai/Mistral-Small-24B-Instruct-2501'
+      cortex_model:    keys.cortex_model    || 'meta-llama/Llama-3.3-70B-Instruct-Turbo'
     };
     fs.writeFileSync(API_KEYS_PATH, JSON.stringify(data, null, 2), 'utf8');
     console.log('[config] API keys saved.');
