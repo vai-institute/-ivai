@@ -1978,6 +1978,15 @@ function onPreferredSelected(slotId) {
       vaiWasEdited = true;
     }
     exitVaiEditMode();
+    // Re-render the panel body with edited text so the user sees their
+    // changes — exitVaiEditMode() shows the original panel body HTML.
+    if (editedText) {
+      var vaiBody = document.getElementById('vai-panel-body');
+      if (vaiBody && typeof marked !== 'undefined') {
+        vaiBody.innerHTML = '<div class="response-text markdown-body">' +
+                            marked.parse(editedText) + '</div>';
+      }
+    }
   }
 
   // If this slot is already preferred, clicking again deselects it
