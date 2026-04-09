@@ -1968,8 +1968,15 @@ function showValidationHint(message) {
  * @returns {void}
  */
 function onPreferredSelected(slotId) {
-  // Mutual exclusivity — exit Edit mode if active
+  // If VAI is in edit mode, flush Quill content to slotState before exiting
+  // so getSlotText() returns the edited text, not the original.
   if (vaiEditMode) {
+    var editedText = getVaiPanelText();
+    if (editedText) {
+      var state = slotState.get('vai-0');
+      if (state) state.fullText = editedText;
+      vaiWasEdited = true;
+    }
     exitVaiEditMode();
   }
 
