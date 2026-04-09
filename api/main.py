@@ -914,6 +914,23 @@ async def vai_review(
         )
 
     if response.status_code != 200:
+        # Detect model-down / service-unavailable from Together AI and
+        # return a structured 503 so the client can show a clean message.
+        try:
+            err_body = response.json()
+            err_type = err_body.get("error", {}).get("type", "")
+        except Exception:
+            err_type = ""
+        if response.status_code == 503 or err_type == "service_unavailable":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "model_unavailable",
+                    "model": review.model,
+                    "message": f"Model {review.model} is currently unavailable on Together AI. "
+                               "Please select a different model and try again.",
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Together AI error: {response.text}",

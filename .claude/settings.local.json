@@ -17,7 +17,9 @@
       "Bash(echo \"EXIT: $?\")",
       "Bash(node --check renderer/renderer.js)",
       "Bash(node -e \"require\\('./package.json'\\)\")",
-      "Bash(node --check main.js)"
+      "Bash(node --check main.js)",
+      "Bash(node:*)",
+      "Bash(python:*)"
     ]
   }
 }

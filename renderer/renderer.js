@@ -111,6 +111,31 @@ let quillEditor = null;
 let originalPrompt = '';
 
 /**
+ * Case number fetched via queue:next that is currently in _in_flight on the
+ * backend. Set when queue:next returns a case; cleared after a successful
+ * write/skip/flag. If the CVA navigates away without acting, loadCase()
+ * releases this case back to the queue.
+ * @type {number|null}
+ */
+let currentQueuedCaseNumber = null;
+
+/**
+ * True when the backend queue returns no more unworked cases.
+ * Keeps the Next button disabled with "Queue empty" label until filters
+ * change or a manual case load resets it.
+ * @type {boolean}
+ */
+let queueExhausted = false;
+
+/**
+ * Number of DPO pairs written for the current case in this session.
+ * Reset to 0 on case navigation. Incremented by Write Pair / Write Additional.
+ * Sent as pair_index in the payload.
+ * @type {number}
+ */
+let currentCasePairCount = 0;
+
+/**
  * turndown service instance for HTML → markdown conversion.
  * Initialized once at startup.
  * @type {TurndownService|null}
@@ -144,7 +169,7 @@ let turndownService = null;
 // ─── Step 2: Corpus loading ───────────────────────────────────────────────────
 
 /**
- * Scans data/corpus/ via the main process, stores cases in `corpus`.
+ * Fetches the full corpus from the Railway API via the main process, stores cases in `corpus`.
  * @returns {Promise<void>}
  */
 async function loadCorpus() {
@@ -960,6 +985,21 @@ function loadCase(caseNumber) {
   // Cancel any in-flight streams from the previous case before loading new one
   window.electronAPI.cancelStream();
 
+  // BUG 1 fix: Release prior queued case back to the queue if the CVA
+  // navigated away without writing, skipping, or flagging it.
+  if (currentQueuedCaseNumber !== null && currentQueuedCaseNumber !== caseNumber) {
+    window.electronAPI.queueRelease(currentQueuedCaseNumber);
+    currentQueuedCaseNumber = null;
+  }
+
+  // BUG 2 fix: Clear slotState before any UI reset so getSlotText() cannot
+  // return stale text from the prior case.
+  slotState.delete('std-0');
+  slotState.delete('vai-0');
+
+  // Reset pair count for the new case
+  currentCasePairCount = 0;
+
   // Clear response panels so stale responses don't persist between cases
   var stdBody = document.getElementById('std-panel-body');
   var vaiBody = document.getElementById('vai-panel-body');
@@ -1074,7 +1114,7 @@ function getFilteredCorpus() {
 /**
  * Updates enabled/disabled state of Prev and Next buttons.
  * Prev disabled when current case is first in the filtered set.
- * Next always enabled — queue endpoint handles end-of-corpus.
+ * Next disabled when the queue is exhausted (no unworked cases remain).
  *
  * @returns {void}
  */
@@ -1090,7 +1130,14 @@ function updateNavButtons() {
   });
 
   btnPrev.disabled = (pos <= 0);
-  btnNext.disabled = false;
+
+  if (queueExhausted) {
+    btnNext.disabled    = true;
+    btnNext.textContent = 'Queue empty';
+  } else {
+    btnNext.disabled    = false;
+    btnNext.textContent = 'Next ▶';
+  }
 }
 
 /**
@@ -1128,18 +1175,20 @@ function initNavigation() {
           activeInversionType || 'all'
         );
         if (result.success && result.case && result.case.case_number) {
+          queueExhausted = false;
+          currentQueuedCaseNumber = result.case.case_number;
           loadCase(result.case.case_number);
         } else if (result.success && !result.case) {
+          // BUG 3 fix: Set exhaustion flag so updateNavButtons() keeps Next
+          // disabled instead of unconditionally re-enabling it.
+          queueExhausted = true;
           console.warn('[nav] Queue exhausted — no more unworked cases.');
-          btnNext.textContent = 'Queue empty';
-          btnNext.disabled = true;
         } else {
           console.warn('[nav] queue:next returned no case:', result.error);
         }
       } catch (err) {
         console.error('[nav] Next failed:', err.message);
       } finally {
-        btnNext.textContent = 'Next ▶';
         updateNavButtons();
       }
     });
@@ -1222,6 +1271,7 @@ function initFilters() {
   if (vertSelect) {
     vertSelect.addEventListener('change', function() {
       activeVertical = vertSelect.value;
+      queueExhausted = false;
       updateNavButtons();
     });
   }
@@ -1229,6 +1279,7 @@ function initFilters() {
   if (typeSelect) {
     typeSelect.addEventListener('change', function() {
       activeInversionType = typeSelect.value;
+      queueExhausted = false;
       updateNavButtons();
     });
   }
@@ -1638,8 +1689,17 @@ function initStreamListeners() {
   window.electronAPI.onLlmError(function(data) {
     var body = document.getElementById(bodyIdForSlot(data.slotId));
     if (body) {
-      body.innerHTML = '<div class="response-error">⚠ ' +
-                       (data.error || 'Generation failed.') + '</div>';
+      // Detect model-unavailable errors and show amber warning instead of red error
+      var err = data.error || 'Generation failed.';
+      if (err.indexOf('MODEL_UNAVAILABLE:') === 0) {
+        var parts   = err.split(':');
+        var modelId = parts[1] || 'unknown';
+        body.innerHTML = '<div class="response-error" style="border-color:var(--amber,#e8a735);color:var(--amber,#e8a735);">' +
+          '⚠ Model <strong>' + modelId + '</strong> is currently unavailable. ' +
+          'Select a different model in the panel header and regenerate.</div>';
+      } else {
+        body.innerHTML = '<div class="response-error">⚠ ' + err + '</div>';
+      }
     }
     var state = slotState.get(data.slotId);
     if (state) state.streaming = false;
@@ -2038,9 +2098,8 @@ function initRolePills() {
   }
 }
 
-// AUDIT RESULT: Cortex call is NOT wired to Preferred pill selection as of 2026-03-20.
-// It only fires via the manual Test button (pill-vai-test → runCortexValidation).
-// Step 3B below adds auto-fire on Preferred selection.
+// Cortex auto-fires on Preferred selection (see onPreferredSelected line 1946)
+// and is also available via the manual Test button (pill-vai-test).
 
 // ─── Step 7B: Edit, Test, and Cortex validation ──────────────────────────────
 
@@ -2186,6 +2245,16 @@ async function fireCortexReview(payload) {
       caseData: payload.caseData
     });
 
+    // Detect model-unavailable before normalizing — show amber warning
+    if (raw.error === 'model_unavailable') {
+      showCortexPopup({
+        model_unavailable: true,
+        model:   raw.model   || 'unknown',
+        message: raw.message || 'Model is currently unavailable.'
+      });
+      return;
+    }
+
     // Normalize API response shape
     var result = {
       has_issues:  raw.clean === false,
@@ -2277,6 +2346,16 @@ async function runCortexValidation() {
       caseData: currentCase
     });
 
+    // Detect model-unavailable before normalizing
+    if (raw.error === 'model_unavailable') {
+      showCortexPopup({
+        model_unavailable: true,
+        model:   raw.model   || 'unknown',
+        message: raw.message || 'Model is currently unavailable.'
+      });
+      return;
+    }
+
     // Normalize API response shape to internal shape.
     // API returns { clean, issues, suggestions, confidence, summary }
     // Renderer uses { has_issues, flags, suggestions, confidence, summary }
@@ -2325,6 +2404,13 @@ function showCortexPopup(result) {
   if (result.loading) {
     contentHtml = '<div class="cortex-loading" style="text-align:center;padding:16px;">' +
                   '<span style="font-size:18px;">⟳</span> Reviewing…</div>';
+
+  } else if (result.model_unavailable) {
+    // Amber/warning style — temporary service issue, not a system failure
+    contentHtml = '<div class="cortex-error" style="border-color:var(--amber,#e8a735);' +
+      'color:var(--amber,#e8a735);background:rgba(232,167,53,0.08);">' +
+      '⚠ <strong>' + (result.model || 'Model') + '</strong> is currently unavailable on Together AI.<br>' +
+      '<span style="font-size:11px;">Select a different Cortex model in ⚙ Settings and retry.</span></div>';
 
   } else if (result.error) {
     contentHtml = '<div class="cortex-error">⚠ ' + result.error;
@@ -2468,6 +2554,357 @@ function initEditTestPills() {
   }
 }
 
+// ─── Step 8: Action Buttons (Write Pair, Write Additional, Skip, Flag) ───────
+
+/**
+ * Advances to the next queued case after a successful write/skip/flag.
+ * Mirrors the Next button's queue:next call but without the Loading… label.
+ * @returns {Promise<void>}
+ */
+async function advanceToNextQueuedCase() {
+  try {
+    var result = await window.electronAPI.queueNext(
+      CURRENT_USER_ID,
+      activeVertical      || 'all',
+      activeInversionType || 'all'
+    );
+    if (result.success && result.case && result.case.case_number) {
+      queueExhausted = false;
+      currentQueuedCaseNumber = result.case.case_number;
+      loadCase(result.case.case_number);
+    } else if (result.success && !result.case) {
+      queueExhausted = true;
+      updateNavButtons();
+    }
+  } catch (err) {
+    console.error('[advance] Next queued case failed:', err.message);
+  }
+}
+
+/**
+ * Assembles the full DPO pair payload from the current case, right rail
+ * curation controls, slot metadata, and response text.
+ *
+ * @returns {Object} Payload matching the PairSubmission schema on the backend
+ */
+function assemblePairPayload() {
+  var c = corpus[currentIndex];
+
+  // ── Right rail curation state ─────────────────────────────────────────────
+  var flagPna      = document.getElementById('flag-pna');
+  var flagIdentity = document.getElementById('flag-identity');
+  var activeMode   = document.querySelector('.mode-chip.active');
+  var activeConf   = document.querySelector('[data-confidence].active');
+  var activeSplit  = document.querySelector('[data-split].active');
+  var overrideEl   = document.getElementById('override-explanation');
+  var cvaNotes     = document.getElementById('cva-notes');
+
+  // ── Slot metadata ─────────────────────────────────────────────────────────
+  var stdModelSel  = document.getElementById('std-model-select');
+  var stdVariant   = document.getElementById('std-variant-select');
+  var vaiModelSel  = document.getElementById('vai-model-select');
+  var vaiIntensity = document.getElementById('vai-intensity-select');
+
+  var stdOpt = stdModelSel ? stdModelSel.options[stdModelSel.selectedIndex] : null;
+  var vaiOpt = vaiModelSel ? vaiModelSel.options[vaiModelSel.selectedIndex] : null;
+
+  return {
+    // Case metadata (from corpus)
+    case_number:           c.case_number,
+    vertical:              c.vertical,
+    inversion_type:        c.inversion_type,
+    subtlety:              c.subtlety,
+    boundary_condition:    c.boundary_condition,
+    inversion_severity:    c.inversion_severity,
+    appropriate_intensity: c.appropriate_intensity,
+    identity_language:     c.identity_language,
+    // data_classification: not yet in corpus — defaults to "general" on backend
+    // ferpa_consent: not yet in corpus — defaults to false on backend
+
+    // Curation controls
+    cva_flags: {
+      pause_and_ask:        flagPna      ? flagPna.checked        : false,
+      identity_declaration: flagIdentity ? flagIdentity.checked   : false,
+      response_mode:        activeMode   ? activeMode.getAttribute('data-mode')         : 'standard-vai',
+      confidence:           activeConf   ? activeConf.getAttribute('data-confidence')   : null,
+      cortex_result:        cortexResult,
+      vai_was_edited:       vaiWasEdited,
+      override_explanation: overrideEl   ? overrideEl.value.trim() : ''
+    },
+    cva_notes:     cvaNotes ? cvaNotes.value.trim() : '',
+    dataset_split: activeSplit ? activeSplit.getAttribute('data-split') : 'train',
+    pair_index:    currentCasePairCount,
+
+    // Slot metadata
+    standard_slot: {
+      model:    stdModelSel ? stdModelSel.value : '',
+      provider: stdOpt      ? (stdOpt.getAttribute('data-provider') || '') : '',
+      variant:  stdVariant  ? stdVariant.value  : 'A',
+      edited:   false
+    },
+    vai_slot: {
+      model:     vaiModelSel  ? vaiModelSel.value  : '',
+      provider:  vaiOpt       ? (vaiOpt.getAttribute('data-provider') || '') : '',
+      intensity: vaiIntensity ? vaiIntensity.value  : 'Balanced',
+      edited:    vaiWasEdited
+    },
+
+    // DPO content
+    input: {
+      messages: [{
+        role:    'user',
+        content: (document.getElementById('prompt-textarea') || {}).value || ''
+      }]
+    },
+    preferred_output: [{
+      role:    'assistant',
+      content: (document.getElementById('preferred-editor') || {}).value || ''
+    }],
+    non_preferred_output: [{
+      role:    'assistant',
+      content: getSlotText(nonPreferredSlotId)
+    }]
+  };
+}
+
+/**
+ * Validates that all preconditions for writing a pair are met.
+ * Returns an error message string, or empty string if valid.
+ *
+ * @returns {string} Validation error message, or '' if all gates pass
+ */
+function validateWritePairGates() {
+  var c = corpus[currentIndex];
+  if (!c) return 'No case loaded.';
+
+  if (!preferredSlotId || !nonPreferredSlotId ||
+      preferredSlotId === nonPreferredSlotId) {
+    return 'Assign both Preferred and Non-preferred to different responses.';
+  }
+
+  var stdPanel = document.getElementById('panel-standard');
+  var vaiPanel = document.getElementById('panel-vai');
+  if ((stdPanel && stdPanel.classList.contains('exploration-mode')) ||
+      (vaiPanel && vaiPanel.classList.contains('exploration-mode'))) {
+    return 'Cannot write pairs with exploration-only models.';
+  }
+
+  if (!document.querySelector('[data-confidence].active')) {
+    return 'Select a confidence rating before writing.';
+  }
+
+  if (vaiWasEdited && cortexResult === null) {
+    return 'Edited response requires VAI validation. Click ⟳ Test.';
+  }
+
+  if (vaiWasEdited && cortexResult && cortexResult.has_issues) {
+    var overrideEl = document.getElementById('override-explanation');
+    if (!overrideEl || !overrideEl.value || overrideEl.value.trim().length <= 10) {
+      return 'Override explanation required (>10 chars) when Cortex found issues.';
+    }
+  }
+
+  var prefText    = (document.getElementById('preferred-editor') || {}).value || '';
+  var nonPrefText = getSlotText(nonPreferredSlotId);
+  if (!prefText.trim()) return 'Preferred response is empty.';
+  if (!nonPrefText.trim()) return 'Non-preferred response is empty.';
+
+  return '';
+}
+
+/**
+ * Wires all four action buttons in the right rail:
+ *   Write Pair, Write Additional Pair, Skip, Flag.
+ *
+ * @returns {void}
+ */
+function initActionButtons() {
+  var btnWritePair = document.getElementById('btn-write-pair');
+  var btnWriteAdd  = document.getElementById('btn-write-additional');
+  var btnSkip      = document.getElementById('btn-skip');
+  var btnFlag      = document.getElementById('btn-flag');
+
+  // ── Write Pair ────────────────────────────────────────────────────────────
+  if (btnWritePair) {
+    btnWritePair.addEventListener('click', async function() {
+      var error = validateWritePairGates();
+      if (error) {
+        showValidationHint(error);
+        return;
+      }
+
+      btnWritePair.disabled    = true;
+      btnWritePair.textContent = 'Writing…';
+
+      try {
+        var payload = assemblePairPayload();
+        var result  = await window.electronAPI.writePair(payload);
+
+        if (result.success) {
+          // Update session counters
+          sessionProgress.pairs_written = (sessionProgress.pairs_written || 0) + 1;
+          if (result.destination === 'holdout') {
+            sessionProgress.pairs_holdout = (sessionProgress.pairs_holdout || 0) + 1;
+          } else {
+            sessionProgress.pairs_train = (sessionProgress.pairs_train || 0) + 1;
+          }
+
+          // Mark case completed (only once per case)
+          if (!sessionProgress.completed_cases) sessionProgress.completed_cases = [];
+          if (sessionProgress.completed_cases.indexOf(payload.case_number) === -1) {
+            sessionProgress.completed_cases.push(payload.case_number);
+          }
+
+          currentCasePairCount++;
+          currentQueuedCaseNumber = null;
+          await saveSession();
+          updateProgress();
+
+          // Flash confirmation
+          btnWritePair.textContent = 'Written!';
+          showValidationHint('');
+          setTimeout(function() {
+            btnWritePair.textContent = 'Write Pair → DPO';
+            btnWritePair.disabled = false;
+            advanceToNextQueuedCase();
+          }, 800);
+        } else {
+          showValidationHint('Write failed: ' + (result.error || 'Unknown error'));
+          btnWritePair.textContent = 'Write Pair → DPO';
+          btnWritePair.disabled = false;
+        }
+      } catch (err) {
+        showValidationHint('Write error: ' + err.message);
+        btnWritePair.textContent = 'Write Pair → DPO';
+        btnWritePair.disabled = false;
+      }
+    });
+  }
+
+  // ── Write Additional Pair ─────────────────────────────────────────────────
+  if (btnWriteAdd) {
+    btnWriteAdd.addEventListener('click', async function() {
+      var error = validateWritePairGates();
+      if (error) {
+        showValidationHint(error);
+        return;
+      }
+
+      btnWriteAdd.disabled    = true;
+      btnWriteAdd.textContent = 'Writing…';
+
+      try {
+        var payload = assemblePairPayload();
+        var result  = await window.electronAPI.writePair(payload);
+
+        if (result.success) {
+          sessionProgress.pairs_written = (sessionProgress.pairs_written || 0) + 1;
+          if (result.destination === 'holdout') {
+            sessionProgress.pairs_holdout = (sessionProgress.pairs_holdout || 0) + 1;
+          } else {
+            sessionProgress.pairs_train = (sessionProgress.pairs_train || 0) + 1;
+          }
+
+          // Do NOT add to completed_cases again or advance — stay on case
+          currentCasePairCount++;
+          await saveSession();
+          updateProgress();
+
+          btnWriteAdd.textContent = 'Written!';
+          showValidationHint('');
+          setTimeout(function() {
+            btnWriteAdd.textContent = '+ Write Additional Pair';
+            btnWriteAdd.disabled = false;
+          }, 800);
+        } else {
+          showValidationHint('Write failed: ' + (result.error || 'Unknown error'));
+          btnWriteAdd.textContent = '+ Write Additional Pair';
+          btnWriteAdd.disabled = false;
+        }
+      } catch (err) {
+        showValidationHint('Write error: ' + err.message);
+        btnWriteAdd.textContent = '+ Write Additional Pair';
+        btnWriteAdd.disabled = false;
+      }
+    });
+  }
+
+  // ── Skip ──────────────────────────────────────────────────────────────────
+  // Hardcoded reason_code/reason_label — expand to a dialog in a future step
+  if (btnSkip) {
+    btnSkip.addEventListener('click', async function() {
+      var c = corpus[currentIndex];
+      if (!c) return;
+
+      btnSkip.disabled    = true;
+      btnSkip.textContent = 'Skipping…';
+
+      try {
+        var result = await window.electronAPI.writeSkip({
+          case_number:  c.case_number,
+          reason_code:  'cva_skip',
+          reason_label: 'CVA skipped',
+          cva_notes:    (document.getElementById('cva-notes') || {}).value || ''
+        });
+
+        if (result.success) {
+          sessionProgress.skipped = (sessionProgress.skipped || 0) + 1;
+          currentQueuedCaseNumber = null;
+          await saveSession();
+          updateProgress();
+          advanceToNextQueuedCase();
+        } else {
+          showValidationHint('Skip failed: ' + (result.error || 'Unknown error'));
+        }
+      } catch (err) {
+        showValidationHint('Skip error: ' + err.message);
+      } finally {
+        btnSkip.textContent = 'Skip ▾';
+        btnSkip.disabled    = false;
+      }
+    });
+  }
+
+  // ── Flag ──────────────────────────────────────────────────────────────────
+  // POST /flags does NOT release from _in_flight — flagged cases stay claimed
+  // on the backend for review. This is intentional: the case remains reserved
+  // so a reviewer can inspect it without another CVA pulling it from the queue.
+  if (btnFlag) {
+    btnFlag.addEventListener('click', async function() {
+      var c = corpus[currentIndex];
+      if (!c) return;
+
+      btnFlag.disabled    = true;
+      btnFlag.textContent = 'Flagging…';
+
+      try {
+        var result = await window.electronAPI.writeFlag({
+          case_number: c.case_number,
+          flag_type:   'team_review',
+          cva_notes:   (document.getElementById('cva-notes') || {}).value || ''
+        });
+
+        if (result.success) {
+          sessionProgress.flagged = (sessionProgress.flagged || 0) + 1;
+          // Do NOT call queueRelease — flagged cases stay in _in_flight
+          // intentionally (see comment above)
+          currentQueuedCaseNumber = null;
+          await saveSession();
+          updateProgress();
+          advanceToNextQueuedCase();
+        } else {
+          showValidationHint('Flag failed: ' + (result.error || 'Unknown error'));
+        }
+      } catch (err) {
+        showValidationHint('Flag error: ' + err.message);
+      } finally {
+        btnFlag.textContent = '⚑ Flag for Team Review';
+        btnFlag.disabled    = false;
+      }
+    });
+  }
+}
+
 // ─── Startup sequence ─────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -2499,6 +2936,7 @@ loadCorpus().then(async function() {
     initRegenButtons();
     initRolePills();
     initEditTestPills();
+    initActionButtons();
 
     // Step 5: Case display and navigation
     initNavigation();
@@ -2506,8 +2944,6 @@ loadCorpus().then(async function() {
     var startCase = (sessionProgress && sessionProgress.last_case_number) || 1;
     loadCase(startCase);
     updateProgress();
-    // TODO Step 8: wire flag defaults from case data
-    // TODO Step 9: wire Write Pair enabled state
     // TODO Step 12: register keyboard shortcuts
   });
 });

@@ -13,15 +13,3 @@ MANDATORY — before every commit, you must:
 3. State: "This is a [Patch/Minor/Major] bump — incrementing to X.Y.Z"
 4. Update package.json and the version display in the config popup
 5. Include the version bump in the commit — never commit without it
-
-## File Locations
-
-Always save output files to local folders on Peter's machine — NOT OneDrive.
-
-Avoid any file path that passes through:
-  C:\Users\peter\OneDrive\
-
-When creating deliverables or output files, use local paths such as:
-  C:\Users\peter\documents\ivai\...
-
-If unsure of the correct local path, ask before saving.

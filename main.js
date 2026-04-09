@@ -702,6 +702,17 @@ async function streamToPanel(event, opts) {
 
     if (!response.ok) {
       const errText = await response.text();
+      // Detect model-unavailable (503 / service_unavailable) and surface
+      // a clean message instead of a raw HTTP error.
+      try {
+        const errJson = JSON.parse(errText);
+        const errType = errJson.error?.type || '';
+        if (response.status === 503 || errType === 'service_unavailable') {
+          throw new Error(`MODEL_UNAVAILABLE:${model}:Model ${model} is currently unavailable. Select a different model and try again.`);
+        }
+      } catch (parseErr) {
+        if (parseErr.message.startsWith('MODEL_UNAVAILABLE:')) throw parseErr;
+      }
       let errMsg = `HTTP ${response.status}`;
       try { errMsg += ': ' + JSON.parse(errText).error.message; }
       catch { errMsg += ': ' + errText.substring(0, 200); }
@@ -930,6 +941,14 @@ ipcMain.handle('cortex:review', async (_event, params) => {
       })
     });
     if (!response.ok) {
+      // Detect structured model_unavailable from the backend (503)
+      try {
+        const errJson = await response.json();
+        const detail  = errJson.detail || {};
+        if (detail.error === 'model_unavailable') {
+          return { error: 'model_unavailable', model: detail.model, message: detail.message };
+        }
+      } catch (_) { /* not JSON — fall through */ }
       throw new Error(`Cortex review failed: ${response.status} ${response.statusText}`);
     }
     return await response.json();
