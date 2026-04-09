@@ -1883,15 +1883,22 @@ function getSlotText(slotId) {
  * @returns {void}
  */
 function updateWritePairEnabled() {
-  var btn = document.getElementById('btn-write-pair');
+  var btn    = document.getElementById('btn-write-pair');
+  var btnAdd = document.getElementById('btn-write-additional');
   if (!btn) return;
+
+  // Helper: disable both buttons together
+  function disableBoth() {
+    btn.disabled = true;
+    if (btnAdd) btnAdd.disabled = true;
+  }
 
   // Block Write Pair when either panel is in exploration mode
   var stdPanel = document.getElementById('panel-standard');
   var vaiPanel = document.getElementById('panel-vai');
   if ((stdPanel && stdPanel.classList.contains('exploration-mode')) ||
       (vaiPanel && vaiPanel.classList.contains('exploration-mode'))) {
-    btn.disabled = true;
+    disableBoth();
     return;
   }
 
@@ -1900,21 +1907,21 @@ function updateWritePairEnabled() {
                      preferredSlotId    !== nonPreferredSlotId;
 
   if (!bothAssigned) {
-    btn.disabled = true;
+    disableBoth();
     return;
   }
 
   // Step 8: Require a confidence chip selection before enabling Write Pair
   var hasConfidence = document.querySelector('[data-confidence].active') !== null;
   if (!hasConfidence) {
-    btn.disabled = true;
+    disableBoth();
     showValidationHint('Select a confidence rating before writing.');
     return;
   }
 
   // If VAI was edited, require validation before enabling Write Pair
   if (vaiWasEdited && cortexResult === null) {
-    btn.disabled = true;
+    disableBoth();
     showValidationHint('Edited response requires VAI validation. Click ⟳ Test to proceed.');
     return;
   }
@@ -1926,12 +1933,13 @@ function updateWritePairEnabled() {
                          overrideEl.value &&
                          overrideEl.value.trim().length > 10;
     if (!hasExplanation) {
-      btn.disabled = true;
+      disableBoth();
       return;
     }
   }
 
   btn.disabled = false;
+  if (btnAdd) btnAdd.disabled = false;
   showValidationHint('');
 }
 
@@ -1981,6 +1989,13 @@ function onPreferredSelected(slotId) {
   clearRoleSelections();
 
   preferredSlotId = slotId;
+
+  // Auto-assign the opposite panel as Non-preferred
+  var oppositeSlotId = slotId.startsWith('vai') ? 'std-0' : 'vai-0';
+  nonPreferredSlotId = oppositeSlotId;
+  var nonPrefPillId  = oppositeSlotId.startsWith('std') ? 'pill-std-nonpref' : 'pill-vai-nonpref';
+  var nonPrefPill    = document.getElementById(nonPrefPillId);
+  if (nonPrefPill) nonPrefPill.classList.add('active-nonpref');
 
   // Mark the correct pill active
   var pillId = slotId.startsWith('vai') ? 'pill-vai-pref' : 'pill-std-pref';
