@@ -1926,21 +1926,19 @@ function updateWritePairEnabled() {
     return;
   }
 
-  // If Cortex found issues, require override explanation (Step 9 wires this fully)
+  // Edited VAI with Cortex issues: block Write Pair entirely.
+  // CVA must use Flag for Review to submit for human review, or Skip.
   if (vaiWasEdited && cortexResult && cortexResult.has_issues) {
-    var overrideEl = document.getElementById('override-explanation');
-    var hasExplanation = overrideEl &&
-                         overrideEl.value &&
-                         overrideEl.value.trim().length > 10;
-    if (!hasExplanation) {
-      disableBoth();
-      return;
-    }
+    disableBoth();
+    showValidationHint('Cortex detected an inversion in your edited response. Use ⚑ Flag for Review to submit for human review, or Skip.');
+    updateFlagButtonLabel();
+    return;
   }
 
   btn.disabled = false;
   if (btnAdd) btnAdd.disabled = false;
   showValidationHint('');
+  updateFlagButtonLabel();
 }
 
 /**
@@ -2477,16 +2475,13 @@ var flagsHtml = (result.flags || []).map(function(f) {
   return '<li>' + f + '</li>';
 }).join('');
 
-    var overrideHtml = vaiWasEdited ? [
-      '<div class="cortex-override">',
-      '  <div class="cortex-override-label">',
-      '    Override reason (required to write pair):',
-      '  </div>',
-      '  <textarea id="override-explanation" rows="3"',
-      '    placeholder="Explain why this response is acceptable despite the flags above…"',
-      '  ></textarea>',
-      '</div>'
-    ].join('') : '';
+    // When edited VAI has Cortex issues, show guidance instead of override field.
+    // Write Pair is blocked — CVA must use Flag for Review or Skip.
+    var overrideHtml = vaiWasEdited
+      ? '<div class="cortex-override" style="font-size:12px;color:var(--amber,#e8a735);margin-top:8px;">' +
+        '⚠ Write Pair is blocked. Use <strong>⚑ Flag for Review</strong> to submit for human review, or <strong>Skip</strong>.' +
+        '</div>'
+      : '';
 
     var suggestionsHtml = (result.suggestions || []).length > 0
       ? '<div style="margin-top:8px;font-size:12px;">' +
@@ -2729,10 +2724,7 @@ function validateWritePairGates() {
   }
 
   if (vaiWasEdited && cortexResult && cortexResult.has_issues) {
-    var overrideEl = document.getElementById('override-explanation');
-    if (!overrideEl || !overrideEl.value || overrideEl.value.trim().length <= 10) {
-      return 'Override explanation required (>10 chars) when Cortex found issues.';
-    }
+    return 'Cortex detected an inversion. Use Flag for Review or Skip.';
   }
 
   var prefText    = (document.getElementById('preferred-editor') || {}).value || '';
@@ -2741,6 +2733,23 @@ function validateWritePairGates() {
   if (!nonPrefText.trim()) return 'Non-preferred response is empty.';
 
   return '';
+}
+
+/**
+ * Updates the Flag button label based on whether an edited VAI response
+ * was flagged by Cortex. In that state the button changes to "Flag for Review"
+ * to signal that the pair will land in a review queue, not training data.
+ *
+ * @returns {void}
+ */
+function updateFlagButtonLabel() {
+  var btnFlag = document.getElementById('btn-flag');
+  if (!btnFlag) return;
+  if (vaiWasEdited && cortexResult && cortexResult.has_issues) {
+    btnFlag.textContent = '⚑ Flag for Review';
+  } else {
+    btnFlag.textContent = '⚑ Flag for Team Review';
+  }
 }
 
 /**
@@ -2900,6 +2909,10 @@ function initActionButtons() {
   // POST /flags does NOT release from _in_flight — flagged cases stay claimed
   // on the backend for review. This is intentional: the case remains reserved
   // so a reviewer can inspect it without another CVA pulling it from the queue.
+  //
+  // When an edited VAI response is flagged by Cortex (has_issues && vaiWasEdited),
+  // the flag carries the full pair context as JSON in cva_notes with
+  // flag_type: "cortex_override" so it lands in a review queue, not training data.
   if (btnFlag) {
     btnFlag.addEventListener('click', async function() {
       var c = corpus[currentIndex];
@@ -2909,10 +2922,26 @@ function initActionButtons() {
       btnFlag.textContent = 'Flagging…';
 
       try {
+        var isCortexOverride = vaiWasEdited && cortexResult && cortexResult.has_issues;
+        var flagType = isCortexOverride ? 'cortex_override' : 'team_review';
+        var cvaNotes = (document.getElementById('cva-notes') || {}).value || '';
+
+        // For cortex override flags, embed the full pair context so reviewers
+        // can reconstruct the pair without re-running the case.
+        if (isCortexOverride) {
+          var pairContext = assemblePairPayload();
+          pairContext.dataset_split = 'review';
+          cvaNotes = JSON.stringify({
+            cva_notes:    cvaNotes,
+            cortex_result: cortexResult,
+            pair_payload:  pairContext
+          });
+        }
+
         var result = await window.electronAPI.writeFlag({
           case_number: c.case_number,
-          flag_type:   'team_review',
-          cva_notes:   (document.getElementById('cva-notes') || {}).value || ''
+          flag_type:   flagType,
+          cva_notes:   cvaNotes
         });
 
         if (result.success) {
@@ -2929,8 +2958,8 @@ function initActionButtons() {
       } catch (err) {
         showValidationHint('Flag error: ' + err.message);
       } finally {
-        btnFlag.textContent = '⚑ Flag for Team Review';
-        btnFlag.disabled    = false;
+        updateFlagButtonLabel();
+        btnFlag.disabled = false;
       }
     });
   }
