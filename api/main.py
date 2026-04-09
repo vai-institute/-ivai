@@ -454,7 +454,7 @@ class ReviewRequest(BaseModel):
     """VAI review proxy payload — forwarded to Together AI."""
     preferred_text: str
     case_context: dict[str, Any]
-    model: Optional[str] = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+    model: Optional[str] = "mistralai/Mistral-Small-24B-Instruct-2501"
 
 
 # ---------------------------------------------------------------------------

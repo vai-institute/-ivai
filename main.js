@@ -907,6 +907,14 @@ ipcMain.handle('cancel-stream', (_event, slotId) => {
  */
 ipcMain.handle('cortex:review', async (_event, params) => {
   try {
+    // Read configured Cortex model from api_keys.json so the backend uses
+    // the user's chosen model instead of its hardcoded default.
+    let cortexModel = 'mistralai/Mistral-Small-24B-Instruct-2501';
+    try {
+      const keys = JSON.parse(fs.readFileSync(API_KEYS_PATH, 'utf8'));
+      if (keys.cortex_model) cortexModel = keys.cortex_model;
+    } catch (_) { /* use default */ }
+
     const response = await fetch(`${API_BASE}/review`, {
       method: 'POST',
       headers: apiHeaders(),
@@ -917,7 +925,8 @@ ipcMain.handle('cortex:review', async (_event, params) => {
           inversion_type: params.caseData.inversion_type  || '',
           primary_entity_i:          params.caseData.primary_entity_i          || '',
           primary_systemic_element_s: params.caseData.primary_systemic_element_s || ''
-        }
+        },
+        model: cortexModel
       })
     });
     if (!response.ok) {
