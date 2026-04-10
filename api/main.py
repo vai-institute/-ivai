@@ -576,7 +576,7 @@ async def login(body: LoginRequest) -> TokenResponse:
 
     # Constant-time failure path to prevent user enumeration
     if not user_record:
-        _pwd_context.dummy_verify()
+        _verify_password("dummy", "$2b$12$R7nrINAgGvx8q/30ZCajKOBZ3aS0eFt7/3u3YlnApkBzC.7z/rt16")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
 
     stored_hash = user_record.get("password_hash", "")
@@ -1160,4 +1160,4 @@ Return ONLY valid JSON in this exact structure:
   "confidence": "Low | Moderate | High"
 }}
 
-If no clear inversions are found, return clean: true with empty issues and suggestions arrays."""
+If no clear inversions are found, r
