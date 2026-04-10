@@ -956,10 +956,44 @@ body {
   border-radius: 5px;
   background: var(--color-bg-panel);
   color: var(--color-text);
-  min-height: 48px;
+  min-height: 96px;
 }
 
 #cva-notes:focus { outline: none; border-color: #4A7BD5; }
+
+/* ── 10a. Case status banner ──────────────────────────────────────────────── */
+
+/* Shown above action buttons when a case has been previously actioned */
+.case-status-banner {
+  margin: 0 10px 6px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: center;
+  border-left: 3px solid transparent;
+  display: none;
+}
+.case-status-banner.status-none    { display: none; }
+.case-status-banner.status-written {
+  display: block;
+  background: #1E3A1E;
+  border-left-color: #4CAF50;
+  color: #81C784;
+}
+.case-status-banner.status-skipped {
+  display: block;
+  background: #2D2A1A;
+  border-left-color: #C8862A;
+  color: #E8A84A;
+}
+.case-status-banner.status-flagged {
+  display: block;
+  background: #2A1A1A;
+  border-left-color: #C84040;
+  color: #E87070;
+}
 
 /* ── 10. Action buttons ───────────────────────────────────────────────────── */
 
@@ -1571,34 +1605,4 @@ body {
   color: #856404;
   font-size: 10px;
   padding: 3px 8px;
-  border-bottom: 1px solid #ffc107;
-  letter-spacing: 0.02em;
-}
-.panel.exploration-mode .pill-role {
-  opacity: 0.35;
-  pointer-events: none;
-  cursor: not-allowed;
-}
-
-/* Axiological highlight toolbar buttons — I / E / S */
-.ql-toolbar .ql-highlight-i,
-.ql-toolbar .ql-highlight-e,
-.ql-toolbar .ql-highlight-s {
-  width: 20px;
-  height: 20px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 700;
-  border: 1px solid #ccc;
-  cursor: pointer;
-  line-height: 18px;
-  padding: 0;
-}
-/* Each button uses its own highlight color as background */
-.ql-toolbar .ql-highlight-i { background: #b7f7c2; color: #1a5c2a; }
-.ql-toolbar .ql-highlight-e { background: #ffe0b2; color: #7a3c00; }
-.ql-toolbar .ql-highlight-s { background: #e0e0e0; color: #333;    }
-
-.ql-toolbar .ql-highlight-i:hover { background: #8ff0a4; }
-.ql-toolbar .ql-highlight-e:hover { background: #ffcc80; }
-.ql-toolbar .ql-highlight-s:hover { background: #bdbdbd; }
+  borde

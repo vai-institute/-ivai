@@ -1095,6 +1095,12 @@ function loadCase(caseNumber) {
   if (intensitySelect && c.appropriate_intensity) {
     intensitySelect.value = c.appropriate_intensity;
   }
+
+  // Show case status banner and adjust Write Pair label
+  updateCaseStatusBanner(c.case_number);
+
+  // Restore prior response state if case was already actioned
+  restoreCaseRecord(c.case_number);
 }
 
 /**
@@ -2752,6 +2758,120 @@ function updateFlagButtonLabel() {
   }
 }
 
+// ─── Case record helpers (status indicator + response restore) ────
+
+/**
+ * Persists a per-case action record to sessionProgress.case_records.
+ * Called after every Write Pair, Skip, or Flag action so navigating
+ * back to a completed case can restore its prior state.
+ */
+function saveCaseRecord(caseNumber, record) {
+  if (!sessionProgress) return;
+  if (!sessionProgress.case_records) sessionProgress.case_records = {};
+  sessionProgress.case_records[String(caseNumber)] = record;
+  // saveSession() is called by the caller after other bookkeeping
+}
+
+/**
+ * Updates the case status banner and Write Pair button label.
+ */
+function updateCaseStatusBanner(caseNumber) {
+  var banner       = document.getElementById('case-status-banner');
+  var writePairBtn = document.getElementById('btn-write-pair');
+  if (!banner) return;
+  var completed = sessionProgress ? (sessionProgress.completed_cases || []) : [];
+  var skipped   = sessionProgress ? (sessionProgress.skipped_cases   || []) : [];
+  var flagged   = sessionProgress ? (sessionProgress.flagged_cases   || []) : [];
+  banner.className = 'case-status-banner';
+  if (completed.indexOf(caseNumber) !== -1) {
+    banner.classList.add('status-written');
+    banner.textContent = '✓ Pair written — submitting again will replace it';
+    if (writePairBtn) writePairBtn.textContent = 'Replace Pair →';
+  } else if (skipped.indexOf(caseNumber) !== -1) {
+    banner.classList.add('status-skipped');
+    banner.textContent = '○ Previously skipped';
+    if (writePairBtn) writePairBtn.textContent = 'Write Pair → DPO';
+  } else if (flagged.indexOf(caseNumber) !== -1) {
+    banner.classList.add('status-flagged');
+    banner.textContent = '⚑ Previously flagged for review';
+    if (writePairBtn) writePairBtn.textContent = 'Write Pair → DPO';
+  } else {
+    banner.classList.add('status-none');
+    banner.textContent = '';
+    if (writePairBtn) writePairBtn.textContent = 'Write Pair → DPO';
+  }
+}
+
+/**
+ * Restores prior response state for a case already actioned.
+ * Only written cases get full restore; skipped/flagged show banner only.
+ */
+async function restoreCaseRecord(caseNumber) {
+  if (!sessionProgress || !sessionProgress.case_records) return;
+  var rec = sessionProgress.case_records[String(caseNumber)];
+  if (!rec || rec.action !== 'written') return;
+  // Restore STD panel
+  if (rec.std_text) {
+    slotState.set('std-0', { streaming: false, fullText: rec.std_text });
+    var stdBody = document.getElementById('std-panel-body');
+    if (stdBody) {
+      try {
+        var stdHtml = await window.electronAPI.renderMarkdown(rec.std_text);
+        stdBody.innerHTML = '<div class="response-text markdown-body">' + stdHtml + '</div>';
+      } catch (e) {
+        stdBody.innerHTML = '<div class="response-text">' + rec.std_text + '</div>';
+      }
+    }
+  }
+  // Restore VAI panel
+  if (rec.vai_text) {
+    slotState.set('vai-0', { streaming: false, fullText: rec.vai_text });
+    var vaiBody = document.getElementById('vai-panel-body');
+    if (vaiBody) {
+      try {
+        var vaiHtml = await window.electronAPI.renderMarkdown(rec.vai_text);
+        vaiBody.innerHTML = '<div class="response-text markdown-body">' + vaiHtml + '</div>';
+      } catch (e) {
+        vaiBody.innerHTML = '<div class="response-text">' + rec.vai_text + '</div>';
+      }
+    }
+  }
+  // Restore role pills
+  if (rec.std_role === 'preferred') {
+    preferredSlotId    = 'std-0';
+    nonPreferredSlotId = 'vai-0';
+    var nonPrefPill = document.getElementById('pill-vai-nonpref');
+    if (nonPrefPill) nonPrefPill.classList.add('active-nonpref');
+  } else if (rec.vai_role === 'preferred') {
+    preferredSlotId    = 'vai-0';
+    nonPreferredSlotId = 'std-0';
+    var prefPill    = document.getElementById('pill-vai-pref');
+    var nonPrefPill = document.getElementById('pill-std-nonpref');
+    if (prefPill)    prefPill.classList.add('active-pref');
+    if (nonPrefPill) nonPrefPill.classList.add('active-nonpref');
+  }
+  // Restore preferred editor
+  var prefEditor = document.getElementById('preferred-editor');
+  if (prefEditor && rec.preferred_text != null) prefEditor.value = rec.preferred_text;
+  // Restore CVA notes
+  var notesEl = document.getElementById('cva-notes');
+  if (notesEl && rec.cva_notes != null) notesEl.value = rec.cva_notes;
+  // Restore confidence chip
+  if (rec.confidence) {
+    document.querySelectorAll('[data-confidence]').forEach(function(chip) {
+      chip.classList.toggle('active', chip.getAttribute('data-confidence') === rec.confidence);
+    });
+  }
+  // Restore dataset split chip
+  if (rec.dataset_split) {
+    document.querySelectorAll('[data-split]').forEach(function(chip) {
+      chip.classList.toggle('active', chip.getAttribute('data-split') === rec.dataset_split);
+    });
+  }
+  // Re-evaluate Write Pair gate
+  updateWritePairEnabled();
+}
+
 /**
  * Wires all four action buttons in the right rail:
  *   Write Pair, Write Additional Pair, Skip, Flag.
@@ -2797,6 +2917,26 @@ function initActionButtons() {
 
           currentCasePairCount++;
           currentQueuedCaseNumber = null;
+
+          // Snapshot for status banner and response restore
+          var activeConf  = document.querySelector('[data-confidence].active');
+          var activeSplit = document.querySelector('[data-split].active');
+          saveCaseRecord(payload.case_number, {
+            action:         'written',
+            std_text:       getSlotText('std-0'),
+            vai_text:       getSlotText('vai-0'),
+            std_role:       preferredSlotId === 'std-0' ? 'preferred'
+                            : (nonPreferredSlotId === 'std-0' ? 'non_preferred' : null),
+            vai_role:       preferredSlotId === 'vai-0' ? 'preferred'
+                            : (nonPreferredSlotId === 'vai-0' ? 'non_preferred' : null),
+            preferred_text: (document.getElementById('preferred-editor') || {}).value || '',
+            cva_notes:      (document.getElementById('cva-notes') || {}).value || '',
+            confidence:     activeConf  ? activeConf.getAttribute('data-confidence')  : null,
+            dataset_split:  activeSplit ? activeSplit.getAttribute('data-split')       : 'train',
+            pair_id:        result.pair_id,
+            timestamp:      new Date().toISOString()
+          });
+
           await saveSession();
           updateProgress();
 
@@ -2889,6 +3029,18 @@ function initActionButtons() {
 
         if (result.success) {
           sessionProgress.skipped = (sessionProgress.skipped || 0) + 1;
+
+          // Track in skipped_cases array for status banner
+          if (!sessionProgress.skipped_cases) sessionProgress.skipped_cases = [];
+          if (sessionProgress.skipped_cases.indexOf(c.case_number) === -1) {
+            sessionProgress.skipped_cases.push(c.case_number);
+          }
+          saveCaseRecord(c.case_number, {
+            action:    'skipped',
+            cva_notes: (document.getElementById('cva-notes') || {}).value || '',
+            timestamp: new Date().toISOString()
+          });
+
           currentQueuedCaseNumber = null;
           await saveSession();
           updateProgress();
@@ -2947,6 +3099,19 @@ function initActionButtons() {
 
         if (result.success) {
           sessionProgress.flagged = (sessionProgress.flagged || 0) + 1;
+
+          // Track in flagged_cases array for status banner
+          if (!sessionProgress.flagged_cases) sessionProgress.flagged_cases = [];
+          if (sessionProgress.flagged_cases.indexOf(c.case_number) === -1) {
+            sessionProgress.flagged_cases.push(c.case_number);
+          }
+          saveCaseRecord(c.case_number, {
+            action:    'flagged',
+            flag_type: flagType,
+            cva_notes: cvaNotes,
+            timestamp: new Date().toISOString()
+          });
+
           // Backend now releases from _in_flight on flag (flag-and-release)
           currentQueuedCaseNumber = null;
           await saveSession();

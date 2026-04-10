@@ -414,12 +414,15 @@
         <!-- CVA notes (spec Section 9.7) -->
         <div>
           <div class="rail-section-label">CVA notes</div>
-          <textarea id="cva-notes" rows="2"
+          <textarea id="cva-notes" rows="5"
             placeholder="Reasoning, concerns, or team notes..."
           ></textarea>
         </div>
 
       </div><!-- /#right-rail-inner -->
+
+      <!-- Case status banner — shown when navigating to a previously actioned case -->
+      <div id="case-status-banner" class="case-status-banner status-none" aria-live="polite"></div>
 
       <!-- Action buttons fixed at bottom of rail (spec Section 10) -->
       <div id="action-buttons">
@@ -542,7 +545,7 @@
         <button class="btn-dialog-secondary" id="btn-settings-cancel">Cancel</button>
         <button class="btn-dialog-primary"   id="btn-settings-save">Save Keys</button>
       </div>
-      <div style="font-size:11px;color:#888;text-align:center;margin-top:8px;">v1.5.1</div>
+      <div style="font-size:11px;color:#888;text-align:center;margin-top:8px;">v1.6.0</div>
     </div>
   </div>
 
@@ -558,10 +561,4 @@
     </div>
   </div>
 
-  <script src="../node_modules/quill/dist/quill.min.js"></script>
-  <script src="../node_modules/marked/marked.min.js"></script>
-  <script src="../node_modules/turndown/dist/turndown.js"></script>
-  <script src="renderer.js"></script>
-
-</body>
-</html>
+  <script src="../node_modules/quill/dist/quill.min.js"></scr
