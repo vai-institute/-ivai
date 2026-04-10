@@ -1160,4 +1160,4 @@ Return ONLY valid JSON in this exact structure:
   "confidence": "Low | Moderate | High"
 }}
 
-If no clear inversions are found, r
+If no clear inversions are found, return clean: true with empty issues and suggestions arrays."""
