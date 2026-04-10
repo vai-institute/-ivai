@@ -96,7 +96,8 @@ let _corpusLoaded = false;
  * Defaults to 'peter_d' for single-user deployments.
  * @type {string}
  */
-let _activeUserId = 'peter_d';
+let _activeUserId = '';
+let _accessToken  = '';
 
 // ─── Streaming state ──────────────────────────────────────────────────────────
 
@@ -124,10 +125,10 @@ let mainWindow = null;
  * @param {string} [userId] - Override user ID. Defaults to _activeUserId.
  * @returns {Object} Headers object with Content-Type and X-User-Id.
  */
-function apiHeaders(userId) {
+function apiHeaders() {
   return {
     'Content-Type': 'application/json',
-    'X-User-Id': userId || _activeUserId
+    'Authorization': `Bearer ${_accessToken}`
   };
 }
 
@@ -236,7 +237,7 @@ ipcMain.handle('auth:login', async (_event, { userId, password }) => {
       body: JSON.stringify({ user_id: userId, password }),
     });
     if (res.status === 401) return { success: false, error: 'Invalid User ID or password.' };
-    if (\!res.ok) return { success: false, error: `Server error (${res.status}). Try again.` };
+    if (!res.ok) return { success: false, error: `Server error (${res.status}). Try again.` };
     const data = await res.json();
     _accessToken  = data.access_token;
     _activeUserId = data.user_id;
@@ -1098,4 +1099,4 @@ ipcMain.handle('config:write-keys', (_event, keys) => {
 
 // ── Steps 13, 16–20 — added in their respective steps ────────────────────────
 // Step 13: 'curation:open-window'
-// Steps 16–20: review and audit channels
+// Steps 16–20: review and 
