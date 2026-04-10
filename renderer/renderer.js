@@ -168,6 +168,43 @@ let turndownService = null;
 
 // ─── Step 2: Corpus loading ───────────────────────────────────────────────────
 
+// ─── Auth helpers ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Called whenever an IPC result carries a 401 / expired-token error.
+ * Shows a modal and asks main process to return to the login screen.
+ */
+function handleSessionExpired() {
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:99999;font-family:sans-serif';
+  overlay.innerHTML = '<div style="background:#242424;border:1px solid #555;border-radius:8px;padding:28px 32px;text-align:center;color:#e0e0e0;max-width:340px;">'
+    + '<div style="font-size:15px;font-weight:600;margin-bottom:8px;">Session Expired</div>'
+    + '<div style="font-size:13px;color:#aaa;margin-bottom:20px;">Your session has expired. Please sign in again.</div>'
+    + '<button id="btn-relogin" style="background:#1565c0;border:none;border-radius:6px;color:#fff;font-size:13px;font-weight:600;padding:9px 24px;cursor:pointer;">Sign In</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  document.getElementById('btn-relogin').addEventListener('click', function() {
+    window.electronAPI.logout();
+  });
+}
+
+/**
+ * Inspect an IPC result for a 401 / auth error; call handleSessionExpired()
+ * and return true if found. Usage: if (checkAuth(result)) return;
+ * @param {Object} result
+ * @returns {boolean}
+ */
+function checkAuth(result) {
+  if (\!result) return false;
+  var msg = (result.error || '').toLowerCase();
+  if (result.status === 401 || msg.indexOf('token invalid') \!== -1
+      || msg.indexOf('expired') \!== -1 || msg.indexOf('please log in') \!== -1) {
+    handleSessionExpired();
+    return true;
+  }
+  return false;
+}
+
 /**
  * Fetches the full corpus from the Railway API via the main process, stores cases in `corpus`.
  * @returns {Promise<void>}
@@ -3141,9 +3178,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // Step 2: Load corpus
 loadCorpus().then(async function() {
-  // Register active user with main process before any authenticated API calls
-  await window.electronAPI.setActiveUser(CURRENT_USER_ID);
-  // Step 3: Init session
+  // Step 3: Init session (user ID resolved by main process after JWT login)
   return initSession();
 }).then(async function() {
   // Step 4: Apply layout and wire interactions

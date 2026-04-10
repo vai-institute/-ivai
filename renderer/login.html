@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IVAI CVA Tool — Sign In</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a1a;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-app-region: drag; /* allow window drag on title-bar area */
+    }
+
+    .card {
+      -webkit-app-region: no-drag;
+      background: #242424;
+      border: 1px solid #333;
+      border-radius: 10px;
+      width: 360px;
+      padding: 36px 32px 32px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    .logo-wordmark {
+      font-size: 22px;
+      font-weight: 700;
+      color: #90caf9;
+      letter-spacing: 1px;
+    }
+    .logo-sub {
+      font-size: 11px;
+      color: #888;
+      margin-top: 2px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #aaa;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    input {
+      width: 100%;
+      background: #1a1a1a;
+      border: 1px solid #404040;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 14px;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color 0.15s;
+      margin-bottom: 16px;
+    }
+    input:focus { border-color: #90caf9; }
+    input::placeholder { color: #555; }
+
+    button#btn-login {
+      width: 100%;
+      background: #1565c0;
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 11px;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      margin-top: 4px;
+    }
+    button#btn-login:hover:not(:disabled) { background: #1976d2; }
+    button#btn-login:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .spinner {
+      display: none;
+      width: 16px; height: 16px;
+      border: 2px solid #ffffff44;
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      margin: 0 auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #error-msg {
+      display: none;
+      background: #3b1010;
+      border: 1px solid #7f1f1f;
+      border-radius: 6px;
+      color: #ef9a9a;
+      font-size: 12px;
+      padding: 9px 12px;
+      margin-top: 14px;
+      text-align: center;
+    }
+
+    .footer {
+      margin-top: 28px;
+      text-align: center;
+      font-size: 11px;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <div class="logo-wordmark">IVAI</div>
+      <div class="logo-sub">CVA Curation Tool</div>
+    </div>
+
+    <label for="input-user">User ID</label>
+    <input id="input-user" type="text" placeholder="e.g. peter_d" autocomplete="username" spellcheck="false" />
+
+    <label for="input-pass">Password</label>
+    <input id="input-pass" type="password" placeholder="••••••••" autocomplete="current-password" />
+
+    <button id="btn-login">
+      <span id="btn-label">Sign In</span>
+      <div class="spinner" id="spinner"></div>
+    </button>
+
+    <div id="error-msg"></div>
+
+    <div class="footer">v1.7.0</div>
+  </div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    const userInput = document.getElementById('input-user');
+    const passInput = document.getElementById('input-pass');
+    const btnLogin  = document.getElementById('btn-login');
+    const btnLabel  = document.getElementById('btn-label');
+    const spinner   = document.getElementById('spinner');
+    const errorMsg  = document.getElementById('error-msg');
+
+    function setLoading(on) {
+      btnLogin.disabled = on;
+      btnLabel.style.display = on ? 'none' : '';
+      spinner.style.display  = on ? 'block' : 'none';
+    }
+
+    function showError(msg) {
+      errorMsg.textContent = msg;
+      errorMsg.style.display = 'block';
+    }
+
+    function clearError() {
+      errorMsg.style.display = 'none';
+    }
+
+    async function attemptLogin() {
+      clearError();
+      const userId   = userInput.value.trim();
+      const password = passInput.value;
+
+      if (!userId)   { showError('Please enter your User ID.'); userInput.focus(); return; }
+      if (!password) { showError('Please enter your password.'); passInput.focus(); return; }
+
+      setLoading(true);
+      try {
+        const result = await ipcRenderer.invoke('auth:login', { userId, password });
+        if (result.success) {
+          // Main process will close this window and open main app
+        } else {
+          showError(result.error || 'Sign-in failed. Please try again.');
+          passInput.value = '';
+          passInput.focus();
+        }
+      } catch (err) {
+        showError('Connection error. Is the backend reachable?');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    btnLogin.addEventListener('click', attemptLogin);
+
+    // Enter key on either field triggers login
+    [userInput, passInput].forEach(el => {
+      el.addEventListener('keydown', e => { if (e.key === 'Enter') attemptLogin(); });
+    });
+
+    // Focus user ID on load
+    window.addEventListener('DOMContentLoaded', () => userInput.focus());
+    userInput.focus();
+  </script>
+</body>
+</html>

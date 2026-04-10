@@ -138,6 +138,36 @@ function apiHeaders(userId) {
  *
  * @returns {void}
  */
+/** @type {BrowserWindow|null} Login window shown at startup */
+let loginWindow = null;
+
+/**
+ * Creates the login window shown at startup.
+ * Closes after successful authentication and opens main window.
+ */
+function createLoginWindow() {
+  loginWindow = new BrowserWindow({
+    width: 420,
+    height: 480,
+    resizable: false,
+    center: true,
+    frame: false,
+    title: 'IVAI CVA Tool — Sign In',
+    backgroundColor: '#1a1a1a',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  loginWindow.loadFile(path.join('renderer', 'login.html'));
+  loginWindow.on('closed', () => { loginWindow = null; });
+}
+
+/**
+ * Creates the main CVA workstation window.
+ * Called only after successful authentication.
+ */
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -164,9 +194,9 @@ function createMainWindow() {
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
-  createMainWindow();
+  createLoginWindow();
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+    if (BrowserWindow.getAllWindows().length === 0) createLoginWindow();
   });
 });
 
@@ -193,6 +223,44 @@ app.on('window-all-closed', () => {
  * Relaunches the Electron app. Triggered from the topbar restart button.
  * @returns {void}
  */
+// -- Authentication IPC --
+
+/**
+ * IPC: auth:login -- POST /auth/login, store JWT, open main window.
+ */
+ipcMain.handle('auth:login', async (_event, { userId, password }) => {
+  try {
+    const res = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, password }),
+    });
+    if (res.status === 401) return { success: false, error: 'Invalid User ID or password.' };
+    if (\!res.ok) return { success: false, error: `Server error (${res.status}). Try again.` };
+    const data = await res.json();
+    _accessToken  = data.access_token;
+    _activeUserId = data.user_id;
+    if (loginWindow) { loginWindow.close(); loginWindow = null; }
+    createMainWindow();
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: 'Cannot reach backend. Check your connection.' };
+  }
+});
+
+/**
+ * IPC: auth:logout -- clear token, close main window, reopen login.
+ */
+ipcMain.handle('auth:logout', () => {
+  _accessToken  = '';
+  _activeUserId = '';
+  if (mainWindow) { mainWindow.close(); mainWindow = null; }
+  createLoginWindow();
+});
+
+/** IPC: auth:get-user -- return user info without exposing the token. */
+ipcMain.handle('auth:get-user', () => ({ userId: _activeUserId }));
+
 ipcMain.handle('app:restart', () => {
   app.relaunch();
   app.exit(0);

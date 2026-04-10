@@ -29,7 +29,14 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
+
+# JWT / auth
+from datetime import timedelta
+import secrets
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 
 # ---------------------------------------------------------------------------
 # Presidio — PII scrubbing
@@ -90,6 +97,47 @@ USERS_FILE = BASE_DIR / "config" / "users.json"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# JWT configuration
+# ---------------------------------------------------------------------------
+
+# Secret key: read from environment variable on Railway. Falls back to a
+# per-process random secret in development (tokens do not survive restarts).
+JWT_SECRET: str = os.environ.get("JWT_SECRET") or secrets.token_hex(32)
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = 8          # one full working session
+
+# bcrypt context for password hashing / verification
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def _hash_password(plain: str) -> str:
+    """Return bcrypt hash of plain-text password."""
+    return _pwd_context.hash(plain)
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    """Return True if plain matches the stored bcrypt hash."""
+    return _pwd_context.verify(plain, hashed)
+
+
+def _create_access_token(user_id: str, display_name: str, role: str) -> str:
+    """
+    Create a signed JWT for the given user.
+
+    Payload includes sub (user_id), name, role, and exp.
+    Token is signed with JWT_SECRET using HS256.
+    """
+    expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS)
+    payload = {
+        "sub": user_id,
+        "name": display_name,
+        "role": role,
+        "exp": expire,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
 
 PAIRS_FILE = OUTPUT_DIR / "arlaf_training_data.jsonl"
 HOLDOUT_FILE = OUTPUT_DIR / "arlaf_holdout_data.jsonl"
@@ -220,23 +268,44 @@ def _require_capability(user: dict, capability: str) -> None:
 # Auth dependency — extracts X-User-Id header and validates
 # ---------------------------------------------------------------------------
 
-def get_current_user(x_user_id: str = Header(..., alias="X-User-Id")) -> dict:
+def get_current_user(authorization: str = Header(..., alias="Authorization")) -> dict:
     """
-    FastAPI dependency: validate X-User-Id header and return user record.
+    FastAPI dependency: validate Bearer JWT and return user record.
 
-    Every protected endpoint injects this dependency. The header value is
-    the user_id string from users.json. In a future auth upgrade this will
-    be replaced by a JWT bearer token — the capability check logic is
-    identical either way.
+    Every protected endpoint injects this dependency. Expects an
+    Authorization: Bearer <token> header containing a signed JWT issued
+    by POST /auth/login.
 
     Args:
-        x_user_id: Value of the X-User-Id request header.
+        authorization: Value of the Authorization header.
 
     Returns:
-        Validated user record dict.
+        Validated user record dict with _user_id attached.
+
+    Raises:
+        HTTPException 401: If the token is missing, malformed, or expired.
+        HTTPException 401: If the user_id in the token is not in users.json.
     """
-    user = _get_user(x_user_id)
-    user["_user_id"] = x_user_id  # attach id for downstream use
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header must be 'Bearer <token>'",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = authorization[len("Bearer "):]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id: str = payload.get("sub")
+        if not user_id:
+            raise JWTError("No sub claim")
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token invalid or expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user = _get_user(user_id)
+    user["_user_id"] = user_id
     return user
 
 
@@ -460,6 +529,99 @@ class ReviewRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Auth route (no authentication required on this endpoint)
+# ---------------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    user_id: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = JWT_EXPIRE_HOURS * 3600
+    user_id: str
+    display_name: str
+    role: str
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(body: LoginRequest) -> TokenResponse:
+    """
+    Authenticate a CVA user and return a signed JWT.
+
+    Validates user_id + password against the bcrypt hash stored in
+    users.json. Returns an access token valid for JWT_EXPIRE_HOURS hours.
+
+    Args:
+        body: JSON body with user_id and password fields.
+
+    Returns:
+        TokenResponse with access_token, expiry, and user metadata.
+
+    Raises:
+        HTTPException 401: If user_id is unknown or password is wrong.
+    """
+    # Load raw users.json to get password_hash (not surfaced in _load_users())
+    if not USERS_FILE.exists():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="User store unavailable.")
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    roles = raw.get("roles", {})
+    users_list = raw.get("users", [])
+    user_record = next((u for u in users_list if u.get("user_id") == body.user_id), None)
+
+    # Constant-time failure path to prevent user enumeration
+    if not user_record:
+        _pwd_context.dummy_verify()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
+
+    stored_hash = user_record.get("password_hash", "")
+    if not stored_hash or not _verify_password(body.password, stored_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
+
+    role = user_record.get("role", "")
+    role_def = roles.get(role, {})
+    display_name = user_record.get("display_name", body.user_id)
+
+    token = _create_access_token(
+        user_id=body.user_id,
+        display_name=display_name,
+        role=role,
+    )
+
+    _write_audit(
+        user_id=body.user_id,
+        action="login",
+        resource_type="session",
+        resource_id=body.user_id,
+        detail={"role": role},
+    )
+
+    return TokenResponse(
+        access_token=token,
+        user_id=body.user_id,
+        display_name=display_name,
+        role=role,
+    )
+
+
+@app.get("/auth/me")
+async def auth_me(user: dict = Depends(get_current_user)) -> dict:
+    """
+    Return the current user's profile from a valid token.
+    Useful for the renderer to confirm a stored token is still valid.
+    """
+    return {
+        "user_id": user["_user_id"],
+        "display_name": user.get("display_name", ""),
+        "role": user.get("role", ""),
+        "capabilities": user.get("capabilities", []),
+    }
+
 
 @app.get("/health")
 async def health_check() -> dict:

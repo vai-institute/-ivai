@@ -49,6 +49,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   restartApp: () => ipcRenderer.invoke('app:restart'),
 
+  // ── Authentication ───────────────────────────────────────────────────────────────────────
+
+  /** Authenticate with user_id + password. Main process stores JWT,
+   *  closes login window, and opens the main workstation window.
+   *  @param {{ userId: string, password: string }} credentials
+   *  @returns {Promise<{ success: boolean, error?: string }>} */
+  login: (credentials) => ipcRenderer.invoke('auth:login', credentials),
+
+  /** Clear the JWT and return to the login screen.
+   *  @returns {Promise<void>} */
+  logout: () => ipcRenderer.invoke('auth:logout'),
+
+  /** Return current user info without exposing the token.
+   *  @returns {Promise<{ userId: string }>} */
+  getAuthUser: () => ipcRenderer.invoke('auth:get-user'),
+
   // ── User management ─────────────────────────────────────────────────────────
 
   /**

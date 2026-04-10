@@ -2,26 +2,41 @@
   "roles": {
     "admin": {
       "label": "System Administrator",
-      "capabilities": ["cva", "review", "senior_review", "admin", "configure"]
+      "capabilities": [
+        "cva",
+        "review",
+        "senior_review",
+        "admin",
+        "configure"
+      ]
     },
     "senior_reviewer": {
       "label": "Senior CVA / Lead Reviewer",
-      "capabilities": ["cva", "review", "senior_review"]
+      "capabilities": [
+        "cva",
+        "review",
+        "senior_review"
+      ]
     },
     "reviewer": {
       "label": "Reviewer",
-      "capabilities": ["review"]
+      "capabilities": [
+        "review"
+      ]
     },
     "cva": {
       "label": "Certified Value Analyst",
-      "capabilities": ["cva"]
+      "capabilities": [
+        "cva"
+      ]
     }
   },
   "users": [
     {
       "user_id": "peter_d",
       "display_name": "Peter Demarest",
-      "role": "admin"
+      "role": "admin",
+      "password_hash": "$2b$12$R7nrINAgGvx8q/30ZCajKOBZ3aS0eFt7/3u3YlnApkBzC.7z/rt16"
     }
   ]
 }
