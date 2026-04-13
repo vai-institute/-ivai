@@ -320,6 +320,7 @@ ipcMain.handle('corpus:load', async (_event, force = false) => {
     const response = await fetch(`${API_BASE}/corpus`, {
       headers: apiHeaders()
     });
+    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
     if (!response.ok) {
       throw new Error(`Corpus fetch failed: ${response.status} ${response.statusText}`);
     }
@@ -411,6 +412,7 @@ ipcMain.handle('session:read', async (_event, userId) => {
       `${API_BASE}/session/${encodeURIComponent(userId)}`,
       { headers: apiHeaders(userId) }
     );
+    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
     if (!response.ok) {
       throw new Error(`Session read failed: ${response.status} ${response.statusText}`);
     }
@@ -454,6 +456,7 @@ ipcMain.handle('session:write', async (_event, userId, state) => {
         body: JSON.stringify(state)
       }
     );
+    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
     if (!response.ok) {
       throw new Error(`Session write failed: ${response.status} ${response.statusText}`);
     }
@@ -495,6 +498,7 @@ ipcMain.handle('session:reset', async (_event, userId) => {
         body: JSON.stringify(defaultSession)
       }
     );
+    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
     if (!response.ok) {
       throw new Error(`Session reset failed: ${response.status} ${response.statusText}`);
     }
@@ -528,6 +532,7 @@ ipcMain.handle('queue:next', async (_event, userId, vertical, inversionType) => 
     const response = await fetch(`${API_BASE}/queue/next${qs}`, {
       headers: apiHeaders(userId)
     });
+    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
     if (!response.ok) {
       throw new Error(`Queue fetch failed: ${response.status} ${response.statusText}`);
     }
@@ -582,6 +587,7 @@ ipcMain.handle('write-pair', async (_event, pairData) => {
       headers: apiHeaders(),
       body: JSON.stringify(pairData)
     });
+    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
     if (!response.ok) {
       const errText = await response.text();
       throw new Error(`Pair write failed: ${response.status} — ${errText}`);
@@ -612,6 +618,7 @@ ipcMain.handle('write-skip', async (_event, skipData) => {
       headers: apiHeaders(),
       body: JSON.stringify(skipData)
     });
+    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
     if (!response.ok) {
       throw new Error(`Skip write failed: ${response.status}`);
     }
@@ -638,6 +645,7 @@ ipcMain.handle('write-flag', async (_event, flagData) => {
       headers: apiHeaders(),
       body: JSON.stringify(flagData)
     });
+    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
     if (!response.ok) {
       throw new Error(`Flag write failed: ${response.status}`);
     }

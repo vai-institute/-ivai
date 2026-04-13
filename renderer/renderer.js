@@ -50,7 +50,7 @@ let activeInversionType = '';
  *   selection UI. Replace with the selected user ID in Step 16.
  * @type {string}
  */
-const CURRENT_USER_ID = 'peter_d';
+let CURRENT_USER_ID = '';  // Populated dynamically from JWT at DOMContentLoaded
 
 /** Loaded API keys from config. Populated by initApiKeys(). @type {Object} */
 let apiKeys = { together_ai: '', openai: '', anthropic: '', google: '' };
@@ -195,10 +195,10 @@ function handleSessionExpired() {
  * @returns {boolean}
  */
 function checkAuth(result) {
-  if (\!result) return false;
+  if (!result) return false;
   var msg = (result.error || '').toLowerCase();
-  if (result.status === 401 || msg.indexOf('token invalid') \!== -1
-      || msg.indexOf('expired') \!== -1 || msg.indexOf('please log in') \!== -1) {
+  if (result.status === 401 || msg.indexOf('token invalid') !== -1
+      || msg.indexOf('expired') !== -1 || msg.indexOf('please log in') !== -1) {
     handleSessionExpired();
     return true;
   }
@@ -212,6 +212,7 @@ function checkAuth(result) {
 async function loadCorpus() {
   try {
     var result = await window.electronAPI.loadCorpus();
+    if (checkAuth(result)) return;
     if (!result.success) {
       console.error('[corpus] Load failed:', result.error);
       return;
@@ -264,6 +265,7 @@ function populateVerticalFilter() {
 async function initSession() {
   try {
     var result = await window.electronAPI.readSession(CURRENT_USER_ID);
+    if (checkAuth(result)) return;
 
     if (!result.success || !result.session) {
       // No session on server yet — reset to defaults
@@ -1217,6 +1219,7 @@ function initNavigation() {
           activeVertical      || 'all',
           activeInversionType || 'all'
         );
+        if (checkAuth(result)) { btnNext.disabled = false; btnNext.textContent = 'Next'; return; }
         if (result.success && result.case && result.case.case_number) {
           queueExhausted = false;
           currentQueuedCaseNumber = result.case.case_number;
@@ -2637,6 +2640,7 @@ async function advanceToNextQueuedCase() {
       activeVertical      || 'all',
       activeInversionType || 'all'
     );
+    if (checkAuth(result)) return;
     if (result.success && result.case && result.case.case_number) {
       queueExhausted = false;
       currentQueuedCaseNumber = result.case.case_number;
@@ -2936,6 +2940,7 @@ function initActionButtons() {
       try {
         var payload = assemblePairPayload();
         var result  = await window.electronAPI.writePair(payload);
+        if (checkAuth(result)) return;
 
         if (result.success) {
           // Update session counters
@@ -3013,6 +3018,7 @@ function initActionButtons() {
       try {
         var payload = assemblePairPayload();
         var result  = await window.electronAPI.writePair(payload);
+        if (checkAuth(result)) return;
 
         if (result.success) {
           sessionProgress.pairs_written = (sessionProgress.pairs_written || 0) + 1;
@@ -3063,6 +3069,7 @@ function initActionButtons() {
           reason_label: 'CVA skipped',
           cva_notes:    (document.getElementById('cva-notes') || {}).value || ''
         });
+        if (checkAuth(result)) return;
 
         if (result.success) {
           sessionProgress.skipped = (sessionProgress.skipped || 0) + 1;
@@ -3133,6 +3140,7 @@ function initActionButtons() {
           flag_type:   flagType,
           cva_notes:   cvaNotes
         });
+        if (checkAuth(result)) return;
 
         if (result.success) {
           sessionProgress.flagged = (sessionProgress.flagged || 0) + 1;
@@ -3176,9 +3184,15 @@ document.addEventListener('DOMContentLoaded', function() {
   panelStandard = document.getElementById('panel-standard');
   panelVai     = document.getElementById('panel-vai');
 
+// Step 0: Resolve authenticated user ID from JWT before any API calls
+window.electronAPI.getAuthUser().then(function(info) {
+  CURRENT_USER_ID = (info && info.userId) ? info.userId : '';
+  console.log('[auth] Authenticated user ID:', CURRENT_USER_ID);
+
 // Step 2: Load corpus
-loadCorpus().then(async function() {
-  // Step 3: Init session (user ID resolved by main process after JWT login)
+return loadCorpus();
+}).then(async function() {
+  // Step 3: Init session (user ID resolved above from JWT)
   return initSession();
 }).then(async function() {
   // Step 4: Apply layout and wire interactions
