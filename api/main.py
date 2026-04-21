@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+import pymysql
+import pymysql.cursors
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -139,12 +141,63 @@ def _create_access_token(user_id: str, display_name: str, role: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+# ---------------------------------------------------------------------------
+# MySQL -- Railway-injected environment variables
+# ---------------------------------------------------------------------------
+
+_DB_CONFIG = {
+    "host":            os.environ.get("MYSQLHOST",     "localhost"),
+    "port":            int(os.environ.get("MYSQLPORT", "3306")),
+    "user":            os.environ.get("MYSQLUSER",     "root"),
+    "password":        os.environ.get("MYSQLPASSWORD", ""),
+    "database":        os.environ.get("MYSQLDATABASE", "railway"),
+    "charset":         "utf8mb4",
+    "cursorclass":     pymysql.cursors.DictCursor,
+    "autocommit":      True,
+    "connect_timeout": 10,
+}
+
+
+def _exec(sql: str, args=None) -> list[dict]:
+    """Execute a SELECT query; returns all rows as a list of dicts."""
+    conn = pymysql.connect(**_DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, args or ())
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def _run(sql: str, args=None) -> int:
+    """Execute a write statement (INSERT/UPDATE/DELETE). Returns lastrowid."""
+    conn = pymysql.connect(**_DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, args or ())
+            return cur.lastrowid
+    finally:
+        conn.close()
+
+
 PAIRS_FILE = OUTPUT_DIR / "arlaf_training_data.jsonl"
 HOLDOUT_FILE = OUTPUT_DIR / "arlaf_holdout_data.jsonl"
 PENDING_FILE = OUTPUT_DIR / "arlaf_pending_review.jsonl"
 SKIPS_FILE = OUTPUT_DIR / "skipped_cases.jsonl"
 FLAGS_FILE = OUTPUT_DIR / "flagged_cases.jsonl"
 AUDIT_FILE = OUTPUT_DIR / "audit_log.jsonl"
+
+# ---------------------------------------------------------------------------
+# Role -> capabilities mapping (authoritative source of truth)
+# ---------------------------------------------------------------------------
+
+ROLE_CAPABILITIES: dict[str, list[str]] = {
+    "admin":           ["cva", "review", "senior_review", "admin", "configure"],
+    "senior_reviewer": ["cva", "review", "senior_review"],
+    "reviewer":        ["review"],
+    "cva":             ["cva"],
+}
+
 
 # ---------------------------------------------------------------------------
 # Thread-safe file lock — prevents concurrent write corruption
@@ -184,6 +237,14 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def _startup_db() -> None:
+    """Migrate tables, seed users, restore queue state on every deploy."""
+    _run_migrations()
+    _seed_users()
+    _restore_inflight()
+
+
 # ---------------------------------------------------------------------------
 # User / role model
 # ---------------------------------------------------------------------------
@@ -219,25 +280,180 @@ def _load_users() -> dict[str, dict]:
 
 def _get_user(user_id: str) -> dict:
     """
-    Return the user record for user_id, or raise 401 if unknown.
-
-    Args:
-        user_id: The user identifier from the X-User-Id request header.
-
-    Returns:
-        User record dict containing at minimum 'capabilities' list.
-
-    Raises:
-        HTTPException 401: If user_id is not found in users.json.
+    Return the user record for user_id from the MySQL users table.
+    Raises HTTP 401 if unknown, HTTP 503 if the database is unavailable.
     """
-    users = _load_users()
-    user = users.get(user_id)
-    if not user:
+    try:
+        rows = _exec(
+            "SELECT user_id, display_name, role FROM users WHERE user_id = %s",
+            (user_id,),
+        )
+    except Exception as db_err:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Database unavailable: {db_err}",
+        )
+    if not rows:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Unknown user: {user_id}",
         )
-    return user
+    row = rows[0]
+    capabilities = ROLE_CAPABILITIES.get(row["role"], [])
+    return {
+        "user_id":      row["user_id"],
+        "display_name": row["display_name"],
+        "role":         row["role"],
+        "capabilities": capabilities,
+    }
+
+
+
+# ---------------------------------------------------------------------------
+# DB migrations -- run on every startup (CREATE TABLE IF NOT EXISTS is safe)
+# ---------------------------------------------------------------------------
+
+def _run_migrations() -> None:
+    """Create all tables if they do not already exist."""
+    ddl = [
+        (
+            "CREATE TABLE IF NOT EXISTS users ("
+            "  user_id       VARCHAR(64)  NOT NULL,"
+            "  display_name  VARCHAR(128) NOT NULL DEFAULT '',"
+            "  role          VARCHAR(32)  NOT NULL DEFAULT 'cva',"
+            "  password_hash VARCHAR(255) NOT NULL,"
+            "  created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  PRIMARY KEY (user_id)"
+            ") CHARACTER SET utf8mb4"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "  user_id           VARCHAR(64) NOT NULL,"
+            "  last_case_number  INT         NOT NULL DEFAULT 1,"
+            "  pairs_written     INT         NOT NULL DEFAULT 0,"
+            "  pairs_train       INT         NOT NULL DEFAULT 0,"
+            "  pairs_holdout     INT         NOT NULL DEFAULT 0,"
+            "  skipped           INT         NOT NULL DEFAULT 0,"
+            "  flagged           INT         NOT NULL DEFAULT 0,"
+            "  completed_cases   LONGTEXT,"
+            "  layout_preset     VARCHAR(32) DEFAULT 'wide',"
+            "  review_mode       VARCHAR(32) DEFAULT 'staged',"
+            "  session_start     VARCHAR(64),"
+            "  last_updated      VARCHAR(64),"
+            "  PRIMARY KEY (user_id)"
+            ") CHARACTER SET utf8mb4"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS queue_inflight ("
+            "  case_number INT         NOT NULL,"
+            "  user_id     VARCHAR(64),"
+            "  claimed_at  DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  PRIMARY KEY (case_number)"
+            ") CHARACTER SET utf8mb4"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS pairs ("
+            "  pair_id             VARCHAR(64) NOT NULL,"
+            "  user_id             VARCHAR(64) NOT NULL,"
+            "  case_number         INT         NOT NULL,"
+            "  pair_index          INT         NOT NULL DEFAULT 0,"
+            "  dataset_split       VARCHAR(16) NOT NULL,"
+            "  vertical            VARCHAR(64),"
+            "  inversion_type      VARCHAR(64),"
+            "  data_classification VARCHAR(32) DEFAULT 'general',"
+            "  ferpa_blocked       TINYINT(1)  NOT NULL DEFAULT 0,"
+            "  pii_scrubbed        TINYINT(1)  NOT NULL DEFAULT 0,"
+            "  payload             LONGTEXT,"
+            "  created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  PRIMARY KEY (pair_id),"
+            "  INDEX idx_pairs_user  (user_id),"
+            "  INDEX idx_pairs_case  (case_number),"
+            "  INDEX idx_pairs_split (dataset_split)"
+            ") CHARACTER SET utf8mb4"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS skips ("
+            "  skip_id      VARCHAR(64)  NOT NULL,"
+            "  user_id      VARCHAR(64)  NOT NULL,"
+            "  case_number  INT          NOT NULL,"
+            "  reason_code  VARCHAR(64),"
+            "  reason_label VARCHAR(128),"
+            "  cva_notes    TEXT,"
+            "  created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  PRIMARY KEY (skip_id),"
+            "  INDEX idx_skips_user (user_id),"
+            "  INDEX idx_skips_case (case_number)"
+            ") CHARACTER SET utf8mb4"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS flags ("
+            "  flag_id     VARCHAR(64) NOT NULL,"
+            "  user_id     VARCHAR(64) NOT NULL,"
+            "  case_number INT         NOT NULL,"
+            "  flag_type   VARCHAR(64),"
+            "  cva_notes   TEXT,"
+            "  created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  PRIMARY KEY (flag_id),"
+            "  INDEX idx_flags_user (user_id),"
+            "  INDEX idx_flags_case (case_number)"
+            ") CHARACTER SET utf8mb4"
+        ),
+    ]
+    conn = pymysql.connect(**_DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            for stmt in ddl:
+                cur.execute(stmt)
+        conn.commit()
+        print("[db] Migrations complete.")
+    except Exception as exc:
+        print(f"[db] Migration error: {exc}")
+        raise
+    finally:
+        conn.close()
+
+
+def _seed_users() -> None:
+    """Seed the users table from users.json if the table is currently empty."""
+    try:
+        rows = _exec("SELECT COUNT(*) AS cnt FROM users")
+        if rows[0]["cnt"] > 0:
+            print("[db] users table already seeded -- skipping.")
+            return
+        if not USERS_FILE.exists():
+            print("[db] WARNING: users.json not found -- cannot seed users table.")
+            return
+        with open(USERS_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        users_list = data.get("users", [])
+        for u in users_list:
+            _run(
+                "INSERT IGNORE INTO users "
+                "(user_id, display_name, role, password_hash) "
+                "VALUES (%s, %s, %s, %s)",
+                (
+                    u["user_id"],
+                    u.get("display_name", u["user_id"]),
+                    u.get("role", "cva"),
+                    u["password_hash"],
+                ),
+            )
+        print(f"[db] Seeded {len(users_list)} user(s) from users.json.")
+    except Exception as exc:
+        print(f"[db] User seed error: {exc}")
+
+
+def _restore_inflight() -> None:
+    """Re-populate the in-memory _in_flight set from queue_inflight on startup."""
+    global _in_flight
+    try:
+        rows = _exec("SELECT case_number FROM queue_inflight")
+        with _queue_lock:
+            _in_flight = {int(r["case_number"]) for r in rows}
+        print(f"[db] Restored {len(_in_flight)} in-flight case(s) from queue_inflight.")
+    except Exception as exc:
+        print(f"[db] Could not restore in-flight cases: {exc}")
+
 
 
 def _require_capability(user: dict, capability: str) -> None:
@@ -438,28 +654,20 @@ def _classify_case(vertical: str) -> str:
 
 def _get_completed_cases() -> set[int]:
     """
-    Return the set of case numbers already present in all output files.
-
-    Scans training, holdout, pending, and skips files so the queue
-    correctly excludes cases that have been processed in any path.
-
-    Returns:
-        Set of integer case numbers that are already complete.
+    Return the set of case numbers already present in the DB
+    (pairs union skips). Called on every /queue/next request.
     """
     completed: set[int] = set()
-    for output_file in [PAIRS_FILE, HOLDOUT_FILE, PENDING_FILE, SKIPS_FILE]:
-        if output_file.exists():
-            with open(output_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            record = json.loads(line)
-                            cn = record.get("case_number")
-                            if cn is not None:
-                                completed.add(int(cn))
-                        except (json.JSONDecodeError, ValueError):
-                            pass
+    try:
+        rows = _exec(
+            "SELECT case_number FROM pairs "
+            "UNION "
+            "SELECT case_number FROM skips"
+        )
+        for r in rows:
+            completed.add(int(r["case_number"]))
+    except Exception as exc:
+        print(f"[db] _get_completed_cases error: {exc}")
     return completed
 
 
@@ -468,7 +676,7 @@ def _get_completed_cases() -> set[int]:
 # ---------------------------------------------------------------------------
 
 class SessionState(BaseModel):
-    """Mirrors the structure of session/progress.json."""
+    """CVA session state persisted to the sessions table."""
     last_case_number: int = 0
     pairs_written: int = 0
     pairs_train: int = 0
@@ -478,6 +686,8 @@ class SessionState(BaseModel):
     session_start: str = ""
     last_updated: str = ""
     completed_cases: list[int] = Field(default_factory=list)
+    layout_preset: str = "wide"
+    review_mode: str = "staged"
 
 
 class PairSubmission(BaseModel):
@@ -564,27 +774,30 @@ async def login(body: LoginRequest) -> TokenResponse:
     Raises:
         HTTPException 401: If user_id is unknown or password is wrong.
     """
-    # Load raw users.json to get password_hash (not surfaced in _load_users())
-    if not USERS_FILE.exists():
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="User store unavailable.")
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-
-    roles = raw.get("roles", {})
-    users_list = raw.get("users", [])
-    user_record = next((u for u in users_list if u.get("user_id") == body.user_id), None)
+    # Query users table (replaces users.json lookup)
+    try:
+        rows = _exec(
+            "SELECT user_id, display_name, role, password_hash "
+            "FROM users WHERE user_id = %s",
+            (body.user_id,),
+        )
+    except Exception as db_err:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Database unavailable: {db_err}",
+        )
 
     # Constant-time failure path to prevent user enumeration
-    if not user_record:
+    if not rows:
         _verify_password("dummy", "$2b$12$R7nrINAgGvx8q/30ZCajKOBZ3aS0eFt7/3u3YlnApkBzC.7z/rt16")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
 
+    user_record = rows[0]
     stored_hash = user_record.get("password_hash", "")
     if not stored_hash or not _verify_password(body.password, stored_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
 
     role = user_record.get("role", "")
-    role_def = roles.get(role, {})
     display_name = user_record.get("display_name", body.user_id)
 
     token = _create_access_token(
@@ -693,12 +906,29 @@ async def get_session(
             detail="Cannot read another user's session.",
         )
 
-    session_file = SESSION_DIR / f"{user_id}.json"
-    if not session_file.exists():
+    rows = _exec("SELECT * FROM sessions WHERE user_id = %s", (user_id,))
+    if not rows:
         return SessionState().model_dump()
 
-    with open(session_file, "r", encoding="utf-8") as f:
-        return json.load(f)
+    row = rows[0]
+    try:
+        completed_cases = json.loads(row.get("completed_cases") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        completed_cases = []
+
+    return {
+        "last_case_number": row.get("last_case_number", 1),
+        "pairs_written":    row.get("pairs_written", 0),
+        "pairs_train":      row.get("pairs_train", 0),
+        "pairs_holdout":    row.get("pairs_holdout", 0),
+        "skipped":          row.get("skipped", 0),
+        "flagged":          row.get("flagged", 0),
+        "completed_cases":  completed_cases,
+        "layout_preset":    row.get("layout_preset", "wide"),
+        "review_mode":      row.get("review_mode", "staged"),
+        "session_start":    row.get("session_start", ""),
+        "last_updated":     row.get("last_updated", ""),
+    }
 
 
 @app.post("/session/{user_id}")
@@ -725,20 +955,46 @@ async def update_session(
             detail="Cannot write another user's session.",
         )
 
-    session_file = SESSION_DIR / f"{user_id}.json"
-
-    # Read before state for audit
-    before = {}
-    if session_file.exists():
-        with open(session_file, "r", encoding="utf-8") as f:
-            before = json.load(f)
+    # Before state for audit log
+    before_rows = _exec("SELECT * FROM sessions WHERE user_id = %s", (user_id,))
+    before = dict(before_rows[0]) if before_rows else {}
 
     state.last_updated = datetime.now(timezone.utc).isoformat()
     after = state.model_dump()
 
-    with _write_lock:
-        with open(session_file, "w", encoding="utf-8") as f:
-            json.dump(after, f, indent=2)
+    _run(
+        "INSERT INTO sessions "
+        "  (user_id, last_case_number, pairs_written, pairs_train, pairs_holdout, "
+        "   skipped, flagged, completed_cases, layout_preset, review_mode, "
+        "   session_start, last_updated) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE "
+        "  last_case_number = VALUES(last_case_number), "
+        "  pairs_written    = VALUES(pairs_written), "
+        "  pairs_train      = VALUES(pairs_train), "
+        "  pairs_holdout    = VALUES(pairs_holdout), "
+        "  skipped          = VALUES(skipped), "
+        "  flagged          = VALUES(flagged), "
+        "  completed_cases  = VALUES(completed_cases), "
+        "  layout_preset    = VALUES(layout_preset), "
+        "  review_mode      = VALUES(review_mode), "
+        "  session_start    = VALUES(session_start), "
+        "  last_updated     = VALUES(last_updated)",
+        (
+            user_id,
+            state.last_case_number,
+            state.pairs_written,
+            state.pairs_train,
+            state.pairs_holdout,
+            state.skipped,
+            state.flagged,
+            json.dumps(state.completed_cases),
+            state.layout_preset,
+            state.review_mode,
+            state.session_start,
+            state.last_updated,
+        ),
+    )
 
     _write_audit(
         user_id=user["_user_id"],
@@ -786,6 +1042,15 @@ async def get_next_case(
             if inversion_type and case.get("inversion_type") != inversion_type:
                 continue
             _in_flight.add(cn)
+            # Persist claim so it survives a redeploy
+            try:
+                _run(
+                    "INSERT IGNORE INTO queue_inflight (case_number, user_id) "
+                    "VALUES (%s, %s)",
+                    (cn, user["_user_id"]),
+                )
+            except Exception as exc:
+                print(f"[db] queue_inflight insert error: {exc}")
             _write_audit(
                 user_id=user["_user_id"],
                 action="case_assigned",
@@ -814,6 +1079,13 @@ async def release_case(
     _require_capability(user, "cva")
     with _queue_lock:
         _in_flight.discard(case_number)
+    try:
+        _run(
+            "DELETE FROM queue_inflight WHERE case_number = %s",
+            (case_number,),
+        )
+    except Exception as exc:
+        print(f"[db] queue_inflight delete error: {exc}")
     return {"released": case_number}
 
 
@@ -905,13 +1177,38 @@ async def submit_pair(
         "non_preferred_output": pair.non_preferred_output,
     }
 
-    with _write_lock:
-        with open(destination, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+    # Insert into DB (replaces JSONL file append)
+    _run(
+        "INSERT INTO pairs "
+        "  (pair_id, user_id, case_number, pair_index, dataset_split, "
+        "   vertical, inversion_type, data_classification, "
+        "   ferpa_blocked, pii_scrubbed, payload) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            pair_id,
+            user["_user_id"],
+            pair.case_number,
+            pair.pair_index,
+            destination_label,
+            pair.vertical,
+            pair.inversion_type,
+            pair.data_classification or "general",
+            int(ferpa_blocked),
+            int(PRESIDIO_AVAILABLE),
+            json.dumps(record),
+        ),
+    )
 
-    # Release from in-flight
+    # Release from in-flight (memory + DB)
     with _queue_lock:
         _in_flight.discard(pair.case_number)
+    try:
+        _run(
+            "DELETE FROM queue_inflight WHERE case_number = %s",
+            (pair.case_number,),
+        )
+    except Exception as exc:
+        print(f"[db] queue_inflight delete error (pairs): {exc}")
 
     # --- Step 4: Audit ---
     _write_audit(
@@ -962,12 +1259,29 @@ async def submit_skip(
         "skipped_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    with _write_lock:
-        with open(SKIPS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+    _run(
+        "INSERT INTO skips "
+        "  (skip_id, user_id, case_number, reason_code, reason_label, cva_notes) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (
+            skip_id,
+            user["_user_id"],
+            skip.case_number,
+            skip.reason_code,
+            skip.reason_label,
+            skip.cva_notes or "",
+        ),
+    )
 
     with _queue_lock:
         _in_flight.discard(skip.case_number)
+    try:
+        _run(
+            "DELETE FROM queue_inflight WHERE case_number = %s",
+            (skip.case_number,),
+        )
+    except Exception as exc:
+        print(f"[db] queue_inflight delete error (skip): {exc}")
 
     _write_audit(
         user_id=user["_user_id"],
@@ -1006,15 +1320,29 @@ async def submit_flag(
         "flagged_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    with _write_lock:
-        with open(FLAGS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+    _run(
+        "INSERT INTO flags "
+        "  (flag_id, user_id, case_number, flag_type, cva_notes) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (
+            flag_id,
+            user["_user_id"],
+            flag.case_number,
+            flag.flag_type,
+            flag.cva_notes or "",
+        ),
+    )
 
-    # Flag-and-release: return the case to the queue pool so it is not
-    # permanently stranded in _in_flight. The flag record is preserved for
-    # future reviewer processing (see renderer/review.js TODO).
+    # Flag-and-release: return the case to the queue pool.
     with _queue_lock:
         _in_flight.discard(flag.case_number)
+    try:
+        _run(
+            "DELETE FROM queue_inflight WHERE case_number = %s",
+            (flag.case_number,),
+        )
+    except Exception as exc:
+        print(f"[db] queue_inflight delete error (flag): {exc}")
 
     _write_audit(
         user_id=user["_user_id"],
