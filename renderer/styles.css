@@ -1066,19 +1066,7 @@ body {
 
 #validation-error.visible { display: block; }
 
-/* ── 11. Resume dialog ────────────────────────────────────────────────────── */
-
-#resume-dialog {
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.5);
-  align-items: center;
-  justify-content: center;
-  z-index: 200;
-}
-
-#resume-dialog.visible { display: flex; }
+/* ── 11. Resume dialog ─ REMOVED in v1.9.0 (auto-resume) ─────────────────── */
 
 .dialog-card {
   background: #fff;

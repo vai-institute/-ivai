@@ -28,6 +28,12 @@ from typing import Any, Optional
 import httpx
 import pymysql
 import pymysql.cursors
+
+# v1.9.0 schema migration (imported via sys.path since api/ is not a package)
+import sys as _sys_for_migrate
+from pathlib import Path as _PathForMigrate
+_sys_for_migrate.path.insert(0, str(_PathForMigrate(__file__).parent))
+import migrate_v190
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -213,7 +219,7 @@ _corpus_lock = threading.Lock()
 
 # Tracks which case numbers are currently being worked on by a CVA, so two
 # CVAs cannot receive the same case from GET /queue/next simultaneously.
-_in_flight: set[int] = set()
+_in_flight: set[str] = set()  # set of case_id strings
 _queue_lock = threading.Lock()
 
 
@@ -240,6 +246,9 @@ app.add_middleware(
 @app.on_event("startup")
 async def _startup_db() -> None:
     """Migrate tables, seed users, restore queue state on every deploy."""
+    # v1.9.0: schema foundation (case_id rename, audit_logs, review cols).
+    # Idempotent via schema_meta; no-ops once applied.
+    migrate_v190.run_if_needed(_DB_CONFIG)
     _run_migrations()
     _seed_users()
     _restore_inflight()
@@ -314,7 +323,14 @@ def _get_user(user_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _run_migrations() -> None:
-    """Create all tables if they do not already exist."""
+    """
+    Create the users table if it does not already exist.
+
+    v1.9.0: the case-related tables (sessions, queue_inflight, pairs,
+    skips, flags) are owned by api/migrate_v190.py. The audit_logs and
+    schema_meta tables are also created there. This function only
+    handles the users table, which is stable across v1.x.
+    """
     ddl = [
         (
             "CREATE TABLE IF NOT EXISTS users ("
@@ -326,78 +342,6 @@ def _run_migrations() -> None:
             "  PRIMARY KEY (user_id)"
             ") CHARACTER SET utf8mb4"
         ),
-        (
-            "CREATE TABLE IF NOT EXISTS sessions ("
-            "  user_id           VARCHAR(64) NOT NULL,"
-            "  last_case_number  INT         NOT NULL DEFAULT 1,"
-            "  pairs_written     INT         NOT NULL DEFAULT 0,"
-            "  pairs_train       INT         NOT NULL DEFAULT 0,"
-            "  pairs_holdout     INT         NOT NULL DEFAULT 0,"
-            "  skipped           INT         NOT NULL DEFAULT 0,"
-            "  flagged           INT         NOT NULL DEFAULT 0,"
-            "  completed_cases   LONGTEXT,"
-            "  layout_preset     VARCHAR(32) DEFAULT 'wide',"
-            "  review_mode       VARCHAR(32) DEFAULT 'staged',"
-            "  session_start     VARCHAR(64),"
-            "  last_updated      VARCHAR(64),"
-            "  PRIMARY KEY (user_id)"
-            ") CHARACTER SET utf8mb4"
-        ),
-        (
-            "CREATE TABLE IF NOT EXISTS queue_inflight ("
-            "  case_number INT         NOT NULL,"
-            "  user_id     VARCHAR(64),"
-            "  claimed_at  DATETIME DEFAULT CURRENT_TIMESTAMP,"
-            "  PRIMARY KEY (case_number)"
-            ") CHARACTER SET utf8mb4"
-        ),
-        (
-            "CREATE TABLE IF NOT EXISTS pairs ("
-            "  pair_id             VARCHAR(64) NOT NULL,"
-            "  user_id             VARCHAR(64) NOT NULL,"
-            "  case_number         INT         NOT NULL,"
-            "  pair_index          INT         NOT NULL DEFAULT 0,"
-            "  dataset_split       VARCHAR(16) NOT NULL,"
-            "  vertical            VARCHAR(64),"
-            "  inversion_type      VARCHAR(64),"
-            "  data_classification VARCHAR(32) DEFAULT 'general',"
-            "  ferpa_blocked       TINYINT(1)  NOT NULL DEFAULT 0,"
-            "  pii_scrubbed        TINYINT(1)  NOT NULL DEFAULT 0,"
-            "  payload             LONGTEXT,"
-            "  created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,"
-            "  PRIMARY KEY (pair_id),"
-            "  INDEX idx_pairs_user  (user_id),"
-            "  INDEX idx_pairs_case  (case_number),"
-            "  INDEX idx_pairs_split (dataset_split)"
-            ") CHARACTER SET utf8mb4"
-        ),
-        (
-            "CREATE TABLE IF NOT EXISTS skips ("
-            "  skip_id      VARCHAR(64)  NOT NULL,"
-            "  user_id      VARCHAR(64)  NOT NULL,"
-            "  case_number  INT          NOT NULL,"
-            "  reason_code  VARCHAR(64),"
-            "  reason_label VARCHAR(128),"
-            "  cva_notes    TEXT,"
-            "  created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,"
-            "  PRIMARY KEY (skip_id),"
-            "  INDEX idx_skips_user (user_id),"
-            "  INDEX idx_skips_case (case_number)"
-            ") CHARACTER SET utf8mb4"
-        ),
-        (
-            "CREATE TABLE IF NOT EXISTS flags ("
-            "  flag_id     VARCHAR(64) NOT NULL,"
-            "  user_id     VARCHAR(64) NOT NULL,"
-            "  case_number INT         NOT NULL,"
-            "  flag_type   VARCHAR(64),"
-            "  cva_notes   TEXT,"
-            "  created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,"
-            "  PRIMARY KEY (flag_id),"
-            "  INDEX idx_flags_user (user_id),"
-            "  INDEX idx_flags_case (case_number)"
-            ") CHARACTER SET utf8mb4"
-        ),
     ]
     conn = pymysql.connect(**_DB_CONFIG)
     try:
@@ -405,7 +349,7 @@ def _run_migrations() -> None:
             for stmt in ddl:
                 cur.execute(stmt)
         conn.commit()
-        print("[db] Migrations complete.")
+        print("[db] users table ensured (v1.9.0 case tables via migrate_v190).")
     except Exception as exc:
         print(f"[db] Migration error: {exc}")
         raise
@@ -447,9 +391,9 @@ def _restore_inflight() -> None:
     """Re-populate the in-memory _in_flight set from queue_inflight on startup."""
     global _in_flight
     try:
-        rows = _exec("SELECT case_number FROM queue_inflight")
+        rows = _exec("SELECT case_id FROM queue_inflight")
         with _queue_lock:
-            _in_flight = {int(r["case_number"]) for r in rows}
+            _in_flight = {str(r["case_id"]) for r in rows}
         print(f"[db] Restored {len(_in_flight)} in-flight case(s) from queue_inflight.")
     except Exception as exc:
         print(f"[db] Could not restore in-flight cases: {exc}")
@@ -560,24 +504,36 @@ def _write_audit(
         before:        State of the resource before the action (mutations).
         after:         State of the resource after the action (mutations).
     """
-    record = {
-        "audit_id": str(uuid.uuid4()),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "user_id": user_id,
-        "action": action,
-        "resource_type": resource_type,
-        "resource_id": resource_id,
-    }
-    if detail:
-        record["detail"] = detail
-    if before is not None:
-        record["before"] = before
-    if after is not None:
-        record["after"] = after
+    audit_id = str(uuid.uuid4())
 
-    with _write_lock:
-        with open(AUDIT_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+    # `before_state` / `after_state` stored as JSON text. `detail` (non-
+    # mutation context, e.g. filter counts) merged into after_state if
+    # no explicit after was supplied, else into before_state, so it
+    # always survives query.
+    merged_after = dict(after) if after is not None else None
+    if detail:
+        if merged_after is not None:
+            merged_after = {**merged_after, "_detail": detail}
+        else:
+            merged_after = {"_detail": detail}
+
+    before_json = json.dumps(before) if before is not None else None
+    after_json  = json.dumps(merged_after) if merged_after is not None else None
+
+    try:
+        _run(
+            "INSERT INTO audit_logs "
+            "  (audit_id, user_id, action, resource_type, resource_id, "
+            "   before_state, after_state) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (audit_id, user_id, action, resource_type, resource_id,
+             before_json, after_json),
+        )
+    except Exception as exc:
+        # Never let audit failure break the request path — but still log
+        # the event to stderr so it is not silently swallowed.
+        print(f"[audit] DB insert failed: {exc} | record=audit_id={audit_id} "
+              f"user={user_id} action={action} resource={resource_type}:{resource_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +545,7 @@ def _ensure_corpus_loaded() -> None:
     Load all JSONL corpus files into memory on first call (lazy singleton).
 
     Scans CORPUS_DIR for *.jsonl files, parses every line, sorts by
-    case_number ascending, and injects a data_classification field on any
+    case_id ascending, and injects a data_classification field on any
     case whose vertical maps to a sensitive data category.
 
     The data_classification field enables the PII scrubber to apply
@@ -624,7 +580,7 @@ def _ensure_corpus_loaded() -> None:
                             except json.JSONDecodeError:
                                 pass  # skip malformed lines
 
-        cases.sort(key=lambda c: c.get("case_number", 0))
+        cases.sort(key=lambda c: c.get("case_id", ""))
         _corpus = cases
         _corpus_loaded = True
         print(f"Loaded {len(_corpus)} cases from {CORPUS_DIR}")
@@ -652,20 +608,24 @@ def _classify_case(vertical: str) -> str:
     return "general"
 
 
-def _get_completed_cases() -> set[int]:
+def _get_completed_cases() -> set[str]:
     """
-    Return the set of case numbers already present in the DB
+    Return the set of case_ids already present in the DB
     (pairs union skips). Called on every /queue/next request.
+
+    Flagged cases are intentionally NOT treated as completed — a flag
+    can coexist with a pair or skip, and flag-only cases should remain
+    in the Raw queue until a pair or skip is written.
     """
-    completed: set[int] = set()
+    completed: set[str] = set()
     try:
         rows = _exec(
-            "SELECT case_number FROM pairs "
+            "SELECT case_id FROM pairs "
             "UNION "
-            "SELECT case_number FROM skips"
+            "SELECT case_id FROM skips"
         )
         for r in rows:
-            completed.add(int(r["case_number"]))
+            completed.add(str(r["case_id"]))
     except Exception as exc:
         print(f"[db] _get_completed_cases error: {exc}")
     return completed
@@ -676,8 +636,17 @@ def _get_completed_cases() -> set[int]:
 # ---------------------------------------------------------------------------
 
 class SessionState(BaseModel):
-    """CVA session state persisted to the sessions table."""
-    last_case_number: int = 0
+    """
+    CVA session state persisted to the sessions table.
+
+    v1.9.0 — counter fields (pairs_written / pairs_train / pairs_holdout
+    / skipped / flagged) and completed_cases are accepted in the payload
+    for backward-shape compatibility but are IGNORED on write. GET
+    /session derives them live from COUNT(*) on the underlying tables
+    (counter truth). Only the non-counter fields below are actually
+    persisted on POST /session.
+    """
+    last_case_id: str = ""
     pairs_written: int = 0
     pairs_train: int = 0
     pairs_holdout: int = 0
@@ -685,14 +654,14 @@ class SessionState(BaseModel):
     flagged: int = 0
     session_start: str = ""
     last_updated: str = ""
-    completed_cases: list[int] = Field(default_factory=list)
+    completed_cases: list[str] = Field(default_factory=list)
     layout_preset: str = "wide"
     review_mode: str = "staged"
 
 
 class PairSubmission(BaseModel):
     """DPO pair payload from the Electron app."""
-    case_number: int
+    case_id: str
     vertical: str
     inversion_type: str
     subtlety: str
@@ -716,7 +685,7 @@ class PairSubmission(BaseModel):
 
 class SkipSubmission(BaseModel):
     """Skip record payload."""
-    case_number: int
+    case_id: str
     reason_code: str
     reason_label: str
     cva_notes: Optional[str] = ""
@@ -724,7 +693,7 @@ class SkipSubmission(BaseModel):
 
 class FlagSubmission(BaseModel):
     """Flag record payload."""
-    case_number: int
+    case_id: str
     flag_type: str
     cva_notes: Optional[str] = ""
 
@@ -907,27 +876,39 @@ async def get_session(
         )
 
     rows = _exec("SELECT * FROM sessions WHERE user_id = %s", (user_id,))
-    if not rows:
-        return SessionState().model_dump()
+    row = rows[0] if rows else {}
 
-    row = rows[0]
+    # v1.9.0 — counter truth: derive live from the tables of record, not
+    # from the sessions row. Flagged cases are counted but do not gate
+    # queue progression.
+    counts = _exec(
+        "SELECT "
+        "  (SELECT COUNT(*) FROM pairs WHERE user_id = %s)                                AS pairs_written, "
+        "  (SELECT COUNT(*) FROM pairs WHERE user_id = %s AND dataset_split = 'train')    AS pairs_train, "
+        "  (SELECT COUNT(*) FROM pairs WHERE user_id = %s AND dataset_split = 'holdout')  AS pairs_holdout, "
+        "  (SELECT COUNT(*) FROM skips WHERE user_id = %s)                                AS skipped, "
+        "  (SELECT COUNT(*) FROM flags WHERE user_id = %s)                                AS flagged",
+        (user_id, user_id, user_id, user_id, user_id),
+    )
+    c = counts[0] if counts else {}
+
     try:
-        completed_cases = json.loads(row.get("completed_cases") or "[]")
+        completed_cases = json.loads(row.get("completed_cases") or "[]") if row else []
     except (json.JSONDecodeError, TypeError):
         completed_cases = []
 
     return {
-        "last_case_number": row.get("last_case_number", 1),
-        "pairs_written":    row.get("pairs_written", 0),
-        "pairs_train":      row.get("pairs_train", 0),
-        "pairs_holdout":    row.get("pairs_holdout", 0),
-        "skipped":          row.get("skipped", 0),
-        "flagged":          row.get("flagged", 0),
+        "last_case_id":     row.get("last_case_id", "") if row else "",
+        "pairs_written":    int(c.get("pairs_written", 0) or 0),
+        "pairs_train":      int(c.get("pairs_train", 0) or 0),
+        "pairs_holdout":    int(c.get("pairs_holdout", 0) or 0),
+        "skipped":          int(c.get("skipped", 0) or 0),
+        "flagged":          int(c.get("flagged", 0) or 0),
         "completed_cases":  completed_cases,
-        "layout_preset":    row.get("layout_preset", "wide"),
-        "review_mode":      row.get("review_mode", "staged"),
-        "session_start":    row.get("session_start", ""),
-        "last_updated":     row.get("last_updated", ""),
+        "layout_preset":    row.get("layout_preset", "wide") if row else "wide",
+        "review_mode":      row.get("review_mode", "staged") if row else "staged",
+        "session_start":    row.get("session_start", "") if row else "",
+        "last_updated":     row.get("last_updated", "") if row else "",
     }
 
 
@@ -962,19 +943,16 @@ async def update_session(
     state.last_updated = datetime.now(timezone.utc).isoformat()
     after = state.model_dump()
 
+    # v1.9.0 — ignore incoming counter fields; they are authoritatively
+    # derived in GET /session. Persist only non-counter session state.
+    # Counter columns are left untouched by UPSERT.
     _run(
         "INSERT INTO sessions "
-        "  (user_id, last_case_number, pairs_written, pairs_train, pairs_holdout, "
-        "   skipped, flagged, completed_cases, layout_preset, review_mode, "
+        "  (user_id, last_case_id, completed_cases, layout_preset, review_mode, "
         "   session_start, last_updated) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
         "ON DUPLICATE KEY UPDATE "
-        "  last_case_number = VALUES(last_case_number), "
-        "  pairs_written    = VALUES(pairs_written), "
-        "  pairs_train      = VALUES(pairs_train), "
-        "  pairs_holdout    = VALUES(pairs_holdout), "
-        "  skipped          = VALUES(skipped), "
-        "  flagged          = VALUES(flagged), "
+        "  last_case_id     = VALUES(last_case_id), "
         "  completed_cases  = VALUES(completed_cases), "
         "  layout_preset    = VALUES(layout_preset), "
         "  review_mode      = VALUES(review_mode), "
@@ -982,12 +960,7 @@ async def update_session(
         "  last_updated     = VALUES(last_updated)",
         (
             user_id,
-            state.last_case_number,
-            state.pairs_written,
-            state.pairs_train,
-            state.pairs_holdout,
-            state.skipped,
-            state.flagged,
+            state.last_case_id,
             json.dumps(state.completed_cases),
             state.layout_preset,
             state.review_mode,
@@ -1034,20 +1007,20 @@ async def get_next_case(
 
     with _queue_lock:
         for case in _corpus:
-            cn = case.get("case_number")
-            if cn in completed or cn in _in_flight:
+            cid = case.get("case_id")
+            if not cid or cid in completed or cid in _in_flight:
                 continue
             if vertical and case.get("vertical") != vertical:
                 continue
             if inversion_type and case.get("inversion_type") != inversion_type:
                 continue
-            _in_flight.add(cn)
+            _in_flight.add(cid)
             # Persist claim so it survives a redeploy
             try:
                 _run(
-                    "INSERT IGNORE INTO queue_inflight (case_number, user_id) "
+                    "INSERT IGNORE INTO queue_inflight (case_id, user_id) "
                     "VALUES (%s, %s)",
-                    (cn, user["_user_id"]),
+                    (cid, user["_user_id"]),
                 )
             except Exception as exc:
                 print(f"[db] queue_inflight insert error: {exc}")
@@ -1055,38 +1028,38 @@ async def get_next_case(
                 user_id=user["_user_id"],
                 action="case_assigned",
                 resource_type="case",
-                resource_id=str(cn),
+                resource_id=cid,
             )
             return {"case": case}
 
     return {"case": None}
 
 
-@app.post("/queue/release/{case_number}")
+@app.post("/queue/release/{case_id}")
 async def release_case(
-    case_number: int,
+    case_id: str,
     user: dict = Depends(get_current_user),
 ) -> dict:
     """
-    Release a case number from the in-flight set without writing a record.
+    Release a case_id from the in-flight set without writing a record.
 
     Called when a CVA navigates away from a case without completing it,
     so other CVAs can pick it up.
 
     Args:
-        case_number: The case number to release.
+        case_id: The case_id (YYMMDD-NNNNN) to release.
     """
     _require_capability(user, "cva")
     with _queue_lock:
-        _in_flight.discard(case_number)
+        _in_flight.discard(case_id)
     try:
         _run(
-            "DELETE FROM queue_inflight WHERE case_number = %s",
-            (case_number,),
+            "DELETE FROM queue_inflight WHERE case_id = %s",
+            (case_id,),
         )
     except Exception as exc:
         print(f"[db] queue_inflight delete error: {exc}")
-    return {"released": case_number}
+    return {"released": case_id}
 
 
 @app.post("/pairs")
@@ -1153,7 +1126,7 @@ async def submit_pair(
     # --- Step 3: Build output record ---
     record = {
         "pair_id": pair_id,
-        "case_number": pair.case_number,
+        "case_id": pair.case_id,
         "vertical": pair.vertical,
         "inversion_type": pair.inversion_type,
         "subtlety": pair.subtlety,
@@ -1180,14 +1153,14 @@ async def submit_pair(
     # Insert into DB (replaces JSONL file append)
     _run(
         "INSERT INTO pairs "
-        "  (pair_id, user_id, case_number, pair_index, dataset_split, "
+        "  (pair_id, user_id, case_id, pair_index, dataset_split, "
         "   vertical, inversion_type, data_classification, "
         "   ferpa_blocked, pii_scrubbed, payload) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             pair_id,
             user["_user_id"],
-            pair.case_number,
+            pair.case_id,
             pair.pair_index,
             destination_label,
             pair.vertical,
@@ -1201,11 +1174,11 @@ async def submit_pair(
 
     # Release from in-flight (memory + DB)
     with _queue_lock:
-        _in_flight.discard(pair.case_number)
+        _in_flight.discard(pair.case_id)
     try:
         _run(
-            "DELETE FROM queue_inflight WHERE case_number = %s",
-            (pair.case_number,),
+            "DELETE FROM queue_inflight WHERE case_id = %s",
+            (pair.case_id,),
         )
     except Exception as exc:
         print(f"[db] queue_inflight delete error (pairs): {exc}")
@@ -1217,7 +1190,7 @@ async def submit_pair(
         resource_type="pair",
         resource_id=pair_id,
         detail={
-            "case_number": pair.case_number,
+            "case_id": pair.case_id,
             "destination": destination_label,
             "ferpa_blocked": ferpa_blocked,
             "pii_scrubbed": PRESIDIO_AVAILABLE,
@@ -1251,7 +1224,7 @@ async def submit_skip(
     skip_id = str(uuid.uuid4())
     record = {
         "skip_id": skip_id,
-        "case_number": skip.case_number,
+        "case_id": skip.case_id,
         "reason_code": skip.reason_code,
         "reason_label": skip.reason_label,
         "cva_notes": skip.cva_notes,
@@ -1261,12 +1234,12 @@ async def submit_skip(
 
     _run(
         "INSERT INTO skips "
-        "  (skip_id, user_id, case_number, reason_code, reason_label, cva_notes) "
+        "  (skip_id, user_id, case_id, reason_code, reason_label, cva_notes) "
         "VALUES (%s, %s, %s, %s, %s, %s)",
         (
             skip_id,
             user["_user_id"],
-            skip.case_number,
+            skip.case_id,
             skip.reason_code,
             skip.reason_label,
             skip.cva_notes or "",
@@ -1274,11 +1247,11 @@ async def submit_skip(
     )
 
     with _queue_lock:
-        _in_flight.discard(skip.case_number)
+        _in_flight.discard(skip.case_id)
     try:
         _run(
-            "DELETE FROM queue_inflight WHERE case_number = %s",
-            (skip.case_number,),
+            "DELETE FROM queue_inflight WHERE case_id = %s",
+            (skip.case_id,),
         )
     except Exception as exc:
         print(f"[db] queue_inflight delete error (skip): {exc}")
@@ -1288,7 +1261,7 @@ async def submit_skip(
         action="case_skipped",
         resource_type="skip",
         resource_id=skip_id,
-        detail={"case_number": skip.case_number, "reason_code": skip.reason_code},
+        detail={"case_id": skip.case_id, "reason_code": skip.reason_code},
     )
 
     return {"skip_id": skip_id}
@@ -1313,7 +1286,7 @@ async def submit_flag(
     flag_id = str(uuid.uuid4())
     record = {
         "flag_id": flag_id,
-        "case_number": flag.case_number,
+        "case_id": flag.case_id,
         "flag_type": flag.flag_type,
         "cva_notes": flag.cva_notes,
         "flagged_by": user["_user_id"],
@@ -1322,12 +1295,12 @@ async def submit_flag(
 
     _run(
         "INSERT INTO flags "
-        "  (flag_id, user_id, case_number, flag_type, cva_notes) "
+        "  (flag_id, user_id, case_id, flag_type, cva_notes) "
         "VALUES (%s, %s, %s, %s, %s)",
         (
             flag_id,
             user["_user_id"],
-            flag.case_number,
+            flag.case_id,
             flag.flag_type,
             flag.cva_notes or "",
         ),
@@ -1335,11 +1308,11 @@ async def submit_flag(
 
     # Flag-and-release: return the case to the queue pool.
     with _queue_lock:
-        _in_flight.discard(flag.case_number)
+        _in_flight.discard(flag.case_id)
     try:
         _run(
-            "DELETE FROM queue_inflight WHERE case_number = %s",
-            (flag.case_number,),
+            "DELETE FROM queue_inflight WHERE case_id = %s",
+            (flag.case_id,),
         )
     except Exception as exc:
         print(f"[db] queue_inflight delete error (flag): {exc}")
@@ -1349,7 +1322,7 @@ async def submit_flag(
         action="case_flagged",
         resource_type="flag",
         resource_id=flag_id,
-        detail={"case_number": flag.case_number, "flag_type": flag.flag_type},
+        detail={"case_id": flag.case_id, "flag_type": flag.flag_type},
     )
 
     return {"flag_id": flag_id}

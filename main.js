@@ -340,20 +340,20 @@ ipcMain.handle('corpus:load', async (_event, force = false) => {
 
 /**
  * IPC handler: corpus:get-case
- * @description Returns a single case by case_number from the in-memory cache.
- *   Used by Step 5 navigation (Prev/Next/Jump) to avoid re-fetching the corpus.
+ * @description Returns a single case by case_id from the in-memory cache.
+ *   Used by navigation (Prev/Next/Jump) to avoid re-fetching the corpus.
  *
  * @param {Electron.IpcMainInvokeEvent} _event
- * @param {number} caseNumber - The case_number to retrieve.
+ * @param {string} caseId - The case_id (YYMMDD-NNNNN) to retrieve.
  * @returns {{ success: boolean, case: Object|null, error?: string }}
  */
-ipcMain.handle('corpus:get-case', (_event, caseNumber) => {
+ipcMain.handle('corpus:get-case', (_event, caseId) => {
   if (!_corpusLoaded) {
     return { success: false, case: null, error: 'Corpus not loaded yet.' };
   }
-  const found = _corpusCache.find(c => c.case_number === caseNumber);
+  const found = _corpusCache.find(c => c.case_id === caseId);
   if (!found) {
-    return { success: false, case: null, error: `Case #${caseNumber} not found.` };
+    return { success: false, case: null, error: `Case ${caseId} not found.` };
   }
   return { success: true, case: found };
 });
@@ -418,7 +418,7 @@ ipcMain.handle('session:read', async (_event, userId) => {
     }
     const raw = await response.json();
     const session = {
-      last_case_number: raw.last_case_number || raw.current_case_number || 1,
+      last_case_id:     raw.last_case_id     || '',
       pairs_written:    raw.pairs_written    || 0,
       pairs_train:      raw.pairs_train      || 0,
       pairs_holdout:    raw.pairs_holdout    || 0,
@@ -467,54 +467,16 @@ ipcMain.handle('session:write', async (_event, userId, state) => {
   }
 });
 
-/**
- * IPC handler: session:reset
- * @description Resets CVA session to factory defaults.
- *
- * @param {Electron.IpcMainInvokeEvent} _event
- * @param {string} userId
- * @returns {Promise<{success: boolean, session: Object|null, error?: string}>}
- */
-ipcMain.handle('session:reset', async (_event, userId) => {
-  const defaultSession = {
-    last_case_number: 1,
-    pairs_written:    0,
-    pairs_train:      0,
-    pairs_holdout:    0,
-    skipped:          0,
-    flagged:          0,
-    session_start:    new Date().toISOString(),
-    last_updated:     new Date().toISOString(),
-    completed_cases:  [],
-    layout_preset:    'wide',
-    review_mode:      'staged'
-  };
-  try {
-    const response = await fetch(
-      `${API_BASE}/session/${encodeURIComponent(userId)}`,
-      {
-        method: 'POST',
-        headers: apiHeaders(userId),
-        body: JSON.stringify(defaultSession)
-      }
-    );
-    if (response.status === 401) return { success: false, status: 401, error: 'Token invalid or expired. Please log in again.' };
-    if (!response.ok) {
-      throw new Error(`Session reset failed: ${response.status} ${response.statusText}`);
-    }
-    return { success: true, session: defaultSession };
-  } catch (err) {
-    console.error('[session:reset]', err.message);
-    return { success: false, error: err.message, session: null };
-  }
-});
-
 // ── Queue ─────────────────────────────────────────────────────────────────────
+// v1.9.0: session:reset IPC handler was removed. Session counters are now
+// derived server-side from COUNT(*) on pairs/skips/flags, so there is no
+// cached counter state to reset. The resume/start-fresh dialog that used
+// this handler has also been removed.
 
 /**
  * IPC handler: queue:next
  * @description Requests next unworked case from the Railway queue.
- *   Returns the full case object from cache after getting the case_number.
+ *   Returns the full case object from cache after getting the case_id.
  *
  * @param {Electron.IpcMainInvokeEvent} _event
  * @param {string} userId
@@ -552,12 +514,12 @@ ipcMain.handle('queue:next', async (_event, userId, vertical, inversionType) => 
  *   away without completing it.
  *
  * @param {Electron.IpcMainInvokeEvent} _event
- * @param {number} caseNumber
+ * @param {string} caseId - The case_id (YYMMDD-NNNNN) to release.
  * @returns {Promise<{success: boolean}>}
  */
-ipcMain.handle('queue:release', async (_event, caseNumber) => {
+ipcMain.handle('queue:release', async (_event, caseId) => {
   try {
-    await fetch(`${API_BASE}/queue/release/${caseNumber}`, {
+    await fetch(`${API_BASE}/queue/release/${encodeURIComponent(caseId)}`, {
       method: 'POST',
       headers: apiHeaders()
     });

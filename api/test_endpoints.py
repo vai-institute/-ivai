@@ -1,135 +1,129 @@
 #!/usr/bin/env python3
 """
-IVAI CVA API — Endpoint Smoke Test
-====================================
-Run this after deployment to verify all 8 endpoints respond correctly.
+IVAI CVA API — Endpoint Smoke Test (v1.9.0)
+==============================================
+Run after deployment to verify the core endpoints respond correctly.
+
+v1.9.0 changes:
+  - Auth is JWT Bearer now (pre-JWT X-User-Id header is gone).
+  - Case identifier is `case_id` VARCHAR(12) in format YYMMDD-NNNNN
+    (was `case_number` INT in v1.8.x).
+  - Session fields use `last_case_id` (was `last_case_number`); counter
+    fields are ignored by POST /session (server derives them).
+  - /queue/release path uses `{case_id}` (was `{case_number}`).
 
 Usage:
-    python api/test_endpoints.py --base-url https://cva.vai-institute.com
-    python api/test_endpoints.py --base-url http://localhost:8000  # local dev
+    python api/test_endpoints.py --base-url https://cva.vai-institute.com \\
+        --user-id peter_d --password 'xxxxx'
+
+    # Local dev
+    python api/test_endpoints.py --base-url http://localhost:8000 \\
+        --user-id peter_d --password 'xxxxx'
 """
 
 import argparse
-import json
 import sys
 
 import httpx
-
-HEADERS = {"X-User-Id": "peter_d"}
 
 
 def check(label: str, response: httpx.Response, expected: int = 200) -> bool:
     """Print pass/fail for a single endpoint check."""
     ok = response.status_code == expected
-    status = "✅ PASS" if ok else "❌ FAIL"
+    status = "PASS" if ok else "FAIL"
     print(f"{status}  {label}  [{response.status_code}]")
     if not ok:
         print(f"       Response: {response.text[:200]}")
     return ok
 
 
-def run(base_url: str) -> int:
+def run(base_url: str, user_id: str, password: str) -> int:
     """Run all smoke tests. Returns number of failures."""
     base_url = base_url.rstrip("/")
     failures = 0
-    client = httpx.Client(timeout=15.0)
+    client = httpx.Client(timeout=30.0)
 
-    print(f"\nIVAI CVA API Smoke Test — {base_url}\n{'─' * 50}")
+    print(f"\nIVAI CVA API Smoke Test (v1.9.0) — {base_url}\n{'-' * 60}")
 
-    # Health (no auth)
+    # --- Health (no auth) ------------------------------------------------
     r = client.get(f"{base_url}/health")
-    if not check("GET  /health", r): failures += 1
+    if not check("GET  /health", r):
+        failures += 1
 
-    # Corpus
-    r = client.get(f"{base_url}/corpus", headers=HEADERS)
-    if not check("GET  /corpus", r): failures += 1
+    # --- Login -> JWT ---------------------------------------------------
+    login_payload = {"user_id": user_id, "password": password}
+    r = client.post(f"{base_url}/auth/login", json=login_payload)
+    if not check("POST /auth/login", r):
+        failures += 1
+        print("       Cannot continue without a token.")
+        return failures
+
+    token = r.json().get("access_token")
+    if not token:
+        print("FAIL  /auth/login returned no access_token in response")
+        return failures + 1
+    print(f"       access_token acquired ({len(token)} chars)")
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # --- Corpus --------------------------------------------------------
+    r = client.get(f"{base_url}/corpus", headers=headers)
+    if not check("GET  /corpus", r):
+        failures += 1
     else:
         data = r.json()
-        print(f"       Loaded {data.get('total', '?')} cases")
+        total = data.get("total", "?")
+        first_case = (data.get("cases") or [{}])[0]
+        print(f"       Loaded {total} cases; first case_id = {first_case.get('case_id')}")
 
-    # Session read (no existing session — expect defaults)
-    r = client.get(f"{base_url}/session/peter_d", headers=HEADERS)
-    if not check("GET  /session/peter_d", r): failures += 1
+    # --- Session read (derived counters in v1.9.0) ---------------------
+    r = client.get(f"{base_url}/session/{user_id}", headers=headers)
+    if not check(f"GET  /session/{user_id}", r):
+        failures += 1
+    else:
+        s = r.json()
+        lc = s.get("last_case_id", "")
+        print(
+            "       last_case_id='{}' pairs={} skipped={} flagged={}".format(
+                lc,
+                s.get("pairs_written"),
+                s.get("skipped"),
+                s.get("flagged"),
+            )
+        )
 
-    # Session write
-    payload = {
-        "last_case_number": 1, "pairs_written": 0, "pairs_train": 0,
-        "pairs_holdout": 0, "skipped": 0, "flagged": 0,
-        "session_start": "2026-03-21T09:00:00Z", "last_updated": "",
-        "completed_cases": []
+    # --- Session write (counter fields will be ignored in v1.9.0) ------
+    session_payload = {
+        "last_case_id":    "",
+        "pairs_written":   0,
+        "pairs_train":     0,
+        "pairs_holdout":   0,
+        "skipped":         0,
+        "flagged":         0,
+        "session_start":   "2026-04-24T00:00:00Z",
+        "last_updated":    "",
+        "completed_cases": [],
+        "layout_preset":   "wide",
+        "review_mode":     "staged",
     }
-    r = client.post(f"{base_url}/session/peter_d", headers=HEADERS, json=payload)
-    if not check("POST /session/peter_d", r): failures += 1
+    r = client.post(f"{base_url}/session/{user_id}", headers=headers, json=session_payload)
+    if not check(f"POST /session/{user_id}", r):
+        failures += 1
 
-    # Queue next
-    r = client.get(f"{base_url}/queue/next", headers=HEADERS)
-    if not check("GET  /queue/next", r): failures += 1
+    # --- Queue next + release ------------------------------------------
+    r = client.get(f"{base_url}/queue/next", headers=headers)
+    if not check("GET  /queue/next", r):
+        failures += 1
     else:
         case = r.json().get("case")
         if case:
-            print(f"       Next case: #{case.get('case_number')} — {case.get('vertical')}")
+            cid = case.get("case_id")
+            print(f"       Next case: {cid} — {case.get('vertical')}")
             print(f"       data_classification: {case.get('data_classification')}")
-            # Release it so we don't pollute the queue
-            cn = case.get("case_number")
-            client.post(f"{base_url}/queue/release/{cn}", headers=HEADERS)
+            # Release so we don't pollute the queue for the real user
+            rel = client.post(f"{base_url}/queue/release/{cid}", headers=headers)
+            print(f"       Released {cid} [{rel.status_code}]")
         else:
-            print("       Queue exhausted (expected if corpus not loaded)")
+            print("       Queue exhausted (expected if all cases completed)")
 
-    # Skip
-    skip_payload = {
-        "case_number": 9999,
-        "reason_code": "technical_failure",
-        "reason_label": "API error — smoke test",
-        "cva_notes": "Smoke test skip — discard"
-    }
-    r = client.post(f"{base_url}/skips", headers=HEADERS, json=skip_payload)
-    if not check("POST /skips", r): failures += 1
-
-    # Flag
-    flag_payload = {
-        "case_number": 9999,
-        "flag_type": "needs_team_review",
-        "cva_notes": "Smoke test flag — discard"
-    }
-    r = client.post(f"{base_url}/flags", headers=HEADERS, json=flag_payload)
-    if not check("POST /flags", r): failures += 1
-
-    # Review (will fail with 503 if TOGETHER_API_KEY not set — that's expected locally)
-    review_payload = {
-        "preferred_text": "Smoke test text. Not a real response.",
-        "case_context": {
-            "vertical": "Healthcare",
-            "inversion_type": "Type IV",
-            "primary_entity_i": "patient",
-            "primary_systemic_element_s": "billing metric"
-        }
-    }
-    r = client.post(f"{base_url}/review", headers=HEADERS, json=review_payload)
-    # 503 = API key not configured (acceptable in local dev), 200 = real call succeeded
-    if r.status_code in (200, 503):
-        status_label = "✅ PASS" if r.status_code == 200 else "⚠️  SKIP"
-        print(f"{status_label}  POST /review  [{r.status_code}]")
-        if r.status_code == 503:
-            print("       TOGETHER_API_KEY not set — skipped (expected in local dev)")
-    else:
-        print(f"❌ FAIL  POST /review  [{r.status_code}]")
-        failures += 1
-
-    print(f"\n{'─' * 50}")
-    if failures == 0:
-        print("All checks passed. ✅")
-    else:
-        print(f"{failures} check(s) failed. ❌")
-
-    return failures
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="IVAI CVA API smoke test")
-    parser.add_argument(
-        "--base-url",
-        default="http://localhost:8000",
-        help="Base URL of the deployed API"
-    )
-    args = parser.parse_args()
-    sys.exit(run(args.base_url))
+    # --- Skip (uses a 

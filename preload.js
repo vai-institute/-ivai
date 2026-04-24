@@ -18,7 +18,7 @@
  * IPC channels by build step:
  *   Step 2:  corpus:load, corpus:get-case, corpus:get-verticals,
  *            corpus:get-filtered
- *   Step 3:  session:read, session:write, session:reset
+ *   Step 3:  session:read, session:write
  *   Step 4:  user:set-active, user:get-list
  *   Step 5:  queue:next, queue:release
  *   Step 6:  generate-standard, generate-vai, cancel-stream, cortex:review
@@ -93,12 +93,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadCorpus: (force) => ipcRenderer.invoke('corpus:load', force),
 
   /**
-   * Returns a single case by case_number from the in-memory cache.
+   * Returns a single case by case_id from the in-memory cache.
    * Used by Prev/Next/Jump navigation — no network call.
-   * @param {number} caseNumber
+   * @param {string} caseId - The case_id (YYMMDD-NNNNN)
    * @returns {{ success: boolean, case: Object|null, error?: string }}
    */
-  getCase: (caseNumber) => ipcRenderer.invoke('corpus:get-case', caseNumber),
+  getCase: (caseId) => ipcRenderer.invoke('corpus:get-case', caseId),
 
   /**
    * Returns the unique list of verticals in the corpus.
@@ -131,14 +131,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   writeSession: (userId, state) => ipcRenderer.invoke('session:write', userId, state),
 
-  /**
-   * Resets session to factory defaults.
-   * @param {string} userId
-   * @returns {Promise<{ success: boolean, session: Object|null, error?: string }>}
-   */
-  resetSession: (userId) => ipcRenderer.invoke('session:reset', userId),
-
   // ── Queue ───────────────────────────────────────────────────────────────────
+  // v1.9.0 note: resetSession was removed — counters are server-derived.
 
   /**
    * Requests the next unworked case from the Railway queue.
@@ -154,10 +148,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /**
    * Releases a case from the in-flight set when navigating away
    * without completing it.
-   * @param {number} caseNumber
+   * @param {string} caseId - The case_id (YYMMDD-NNNNN)
    * @returns {Promise<{ success: boolean }>}
    */
-  queueRelease: (caseNumber) => ipcRenderer.invoke('queue:release', caseNumber),
+  queueRelease: (caseId) => ipcRenderer.invoke('queue:release', caseId),
 
   // ── API key configuration ───────────────────────────────────────────────────
 

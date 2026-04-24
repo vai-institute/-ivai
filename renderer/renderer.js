@@ -263,76 +263,49 @@ function populateVerticalFilter() {
  * @returns {Promise<void>}
  */
 async function initSession() {
+  // v1.9.0 — Auto-resume. The Resume/Start Fresh dialog was removed
+  // because counters are now derived server-side from COUNT(*) on pairs/
+  // skips/flags (counter truth), so "Start Fresh" no longer has anything
+  // meaningful to reset. On launch we always read the session and resume.
   try {
     var result = await window.electronAPI.readSession(CURRENT_USER_ID);
     if (checkAuth(result)) return;
 
     if (!result.success || !result.session) {
-      // No session on server yet — reset to defaults
-      var resetResult = await window.electronAPI.resetSession(CURRENT_USER_ID);
-      sessionProgress = resetResult.session;
-      console.log('[session] First launch — fresh session created.');
+      // No session on server yet — use in-memory defaults. POST /session
+      // will UPSERT on first write.
+      sessionProgress = {
+        last_case_id:    '',
+        pairs_written:   0,
+        pairs_train:     0,
+        pairs_holdout:   0,
+        skipped:         0,
+        flagged:         0,
+        session_start:   new Date().toISOString(),
+        last_updated:    new Date().toISOString(),
+        completed_cases: [],
+        layout_preset:   'wide',
+        review_mode:     'staged'
+      };
+      console.log('[session] First launch — fresh in-memory session.');
       return;
     }
 
     sessionProgress = result.session;
-
-    if (result.session.last_case_number && result.session.pairs_written > 0) {
-      await showResumeDialog(result.session);
-    }
-
-    console.log('[session] Resuming from case #' + result.session.last_case_number +
-                '. ' + result.session.pairs_written + ' pairs written.');
-
+    console.log('[session] Resuming at case ' + (result.session.last_case_id || '(none)') +
+                '. ' + result.session.pairs_written + ' pair(s) written.');
   } catch (err) {
     console.error('[session] initSession failed:', err.message);
   }
 }
 
-/**
- * Shows the resume/start-fresh dialog. Resolves when the CVA makes a choice.
- * @param {object} progress - Existing progress object
- * @returns {Promise<void>}
- */
-function showResumeDialog(progress) {
-  return new Promise(function(resolve) {
-    var dialog    = document.getElementById('resume-dialog');
-    var msgEl     = document.getElementById('resume-message');
-    var resumeBtn = document.getElementById('btn-resume');
-    var freshBtn  = document.getElementById('btn-start-fresh');
-
-    var pairsLabel = progress.pairs_written === 1 ? 'pair' : 'pairs';
-    msgEl.textContent = 'Previous session found: Case #' + progress.last_case_number +
-                        ', ' + progress.pairs_written + ' ' + pairsLabel + ' written.';
-
-    // Show dialog using CSS class (cleaner than inline style)
-    dialog.classList.add('visible');
-
-    var onResume, onFresh;
-
-    onResume = function() {
-      resumeBtn.removeEventListener('click', onResume);
-      freshBtn.removeEventListener('click', onFresh);
-      dialog.classList.remove('visible');
-      console.log('[session] CVA chose Resume.');
-      resolve();
-    };
-
-    onFresh = function() {
-      resumeBtn.removeEventListener('click', onResume);
-      freshBtn.removeEventListener('click', onFresh);
-      dialog.classList.remove('visible');
-      window.electronAPI.resetSession(CURRENT_USER_ID).then(function(r) {
-        sessionProgress = r.session;
-        currentIndex    = 0;
-        console.log('[session] CVA chose Start Fresh.');
-        resolve();
-      });
-    };
-
-    resumeBtn.addEventListener('click', onResume);
-    freshBtn.addEventListener('click', onFresh);
-  });
+// Placeholder kept so any stray call-site (should be none after v1.9.0)
+// still exits cleanly instead of throwing. The resume dialog is gone.
+function showResumeDialog() {
+  // v1.9.0: the resume dialog was removed. This stub is retained only so
+  // stray call sites (there should be none) exit cleanly instead of
+  // throwing. The Promise resolves immediately.
+  return Promise.resolve();
 }
 
 /**
@@ -1010,23 +983,23 @@ function updateProgress() {
 }
 
 /**
- * Loads a corpus case by case_number and populates all UI regions:
+ * Loads a corpus case by case_id and populates all UI regions:
  *   - Sidebar metadata rows and entity cards
  *   - Prompt bar (case identifier label + prompt text)
  *   - Prompt bar inline badges (inversion type, subtlety, intensity)
- *   - Updates currentIndex and sessionProgress.last_case_number
+ *   - Updates currentIndex and sessionProgress.last_case_id
  *   - Updates Prev button enabled state
  *
- * @param {number} caseNumber - The case_number to display
+ * @param {number} caseId - The case_id to display
  * @returns {void}
  */
-function loadCase(caseNumber) {
+function loadCase(caseId) {
   // Cancel any in-flight streams from the previous case before loading new one
   window.electronAPI.cancelStream();
 
   // BUG 1 fix: Release prior queued case back to the queue if the CVA
   // navigated away without writing, skipping, or flagging it.
-  if (currentQueuedCaseNumber !== null && currentQueuedCaseNumber !== caseNumber) {
+  if (currentQueuedCaseNumber !== null && currentQueuedCaseNumber !== caseId) {
     window.electronAPI.queueRelease(currentQueuedCaseNumber);
     currentQueuedCaseNumber = null;
   }
@@ -1056,9 +1029,9 @@ function loadCase(caseNumber) {
   if (cortexPopup) cortexPopup.remove();
 
   // Find the case in the corpus array
-  var c = corpus.find(function(item) { return item.case_number === caseNumber; });
+  var c = corpus.find(function(item) { return item.case_id === caseId; });
   if (!c) {
-    console.warn('[loadCase] Case #' + caseNumber + ' not found in corpus.');
+    console.warn('[loadCase] Case ' + caseId + ' not found in corpus.');
     return;
   }
 
@@ -1066,7 +1039,7 @@ function loadCase(caseNumber) {
   currentIndex = corpus.indexOf(c);
 
   // ── Sidebar metadata ──────────────────────────────────────────────────────
-  setMetaBadge('meta-case-number', String(c.case_number));
+  setMetaBadge('meta-case-id', c.case_id);
   setMetaBadge('meta-vertical',    c.vertical);
   setMetaBadge('meta-inversion-type', c.inversion_type, 'inversion_type', c.inversion_type);
   setMetaBadge('meta-subtlety',    c.subtlety,    'subtlety',    c.subtlety);
@@ -1088,7 +1061,7 @@ function loadCase(caseNumber) {
   // ── Prompt bar ────────────────────────────────────────────────────────────
   var caseIdEl = document.getElementById('prompt-case-id');
   if (caseIdEl) {
-    caseIdEl.textContent = 'Case #' + c.case_number + ' — ' + c.vertical;
+    caseIdEl.textContent = 'Case ' + c.case_id + ' — ' + c.vertical;
   }
 
   // Populate the editable prompt textarea and store original for reset
@@ -1118,7 +1091,7 @@ function loadCase(caseNumber) {
 
   // ── Session state ─────────────────────────────────────────────────────────
   if (sessionProgress) {
-    sessionProgress.last_case_number = c.case_number;
+    sessionProgress.last_case_id = c.case_id;
     saveSession();
   }
 
@@ -1136,10 +1109,10 @@ function loadCase(caseNumber) {
   }
 
   // Show case status banner and adjust Write Pair label
-  updateCaseStatusBanner(c.case_number);
+  updateCaseStatusBanner(c.case_id);
 
   // Restore prior response state if case was already actioned
-  restoreCaseRecord(c.case_number);
+  restoreCaseRecord(c.case_id);
 }
 
 /**
@@ -1171,7 +1144,7 @@ function updateNavButtons() {
   var filtered = getFilteredCorpus();
   var currentCase = corpus[currentIndex];
   var pos = filtered.findIndex(function(c) {
-    return c.case_number === (currentCase || {}).case_number;
+    return c.case_id === (currentCase || {}).case_id;
   });
 
   btnPrev.disabled = (pos <= 0);
@@ -1203,9 +1176,9 @@ function initNavigation() {
       var filtered    = getFilteredCorpus();
       var currentCase = corpus[currentIndex];
       var pos = filtered.findIndex(function(c) {
-        return c.case_number === (currentCase || {}).case_number;
+        return c.case_id === (currentCase || {}).case_id;
       });
-      if (pos > 0) loadCase(filtered[pos - 1].case_number);
+      if (pos > 0) loadCase(filtered[pos - 1].case_id);
     });
   }
 
@@ -1220,10 +1193,10 @@ function initNavigation() {
           activeInversionType || 'all'
         );
         if (checkAuth(result)) { btnNext.disabled = false; btnNext.textContent = 'Next'; return; }
-        if (result.success && result.case && result.case.case_number) {
+        if (result.success && result.case && result.case.case_id) {
           queueExhausted = false;
-          currentQueuedCaseNumber = result.case.case_number;
-          loadCase(result.case.case_number);
+          currentQueuedCaseNumber = result.case.case_id;
+          loadCase(result.case.case_id);
         } else if (result.success && !result.case) {
           // BUG 3 fix: Set exhaustion flag so updateNavButtons() keeps Next
           // disabled instead of unconditionally re-enabling it.
@@ -1246,7 +1219,7 @@ function initNavigation() {
 }
 
 /**
- * Shows the Jump to Case # inline modal.
+ * Shows the Jump to Case ID inline modal.
  * Validates the entered number against the loaded corpus.
  * Navigates on Enter or Go; dismisses on Escape or Cancel.
  *
@@ -1260,10 +1233,10 @@ function showJumpModal() {
   modal.id = 'jump-modal';
   modal.className = 'dialog-overlay visible';
   modal.innerHTML = [
-    '<div class="dialog-card" style="width:280px;">',
-    '  <h2 style="margin-bottom:10px;">Jump to Case #</h2>',
-    '  <input type="number" id="jump-input" min="1" max="3200"',
-    '         placeholder="Enter case number…"',
+    '<div class="dialog-card" style="width:320px;">',
+    '  <h2 style="margin-bottom:10px;">Jump to Case ID</h2>',
+    '  <input type="text" id="jump-input" maxlength="12"',
+    '         placeholder="YYMMDD-NNNNN (e.g. 260314-00050)"',
     '         style="width:100%;box-sizing:border-box;padding:6px 8px;',
     '                font-size:13px;border:1px solid var(--border);',
     '                border-radius:4px;background:var(--bg-secondary);" />',
@@ -1285,14 +1258,25 @@ function showJumpModal() {
   setTimeout(function() { input && input.focus(); }, 50);
 
   function tryJump() {
-    var num   = parseInt(input.value, 10);
-    var found = corpus.find(function(c) { return c.case_number === num; });
+    var raw = (input.value || '').trim();
+    // Accept bare 1..99999 as shorthand and promote to seed-batch case_id.
+    if (/^\d+$/.test(raw)) {
+      var n = parseInt(raw, 10);
+      if (n >= 1 && n <= 99999) {
+        raw = '260314-' + String(n).padStart(5, '0');
+      }
+    }
+    if (!/^\d{6}-\d{5}$/.test(raw)) {
+      errorEl.textContent = 'Enter a case ID like 260314-00050.';
+      return;
+    }
+    var found = corpus.find(function(c) { return c.case_id === raw; });
     if (!found) {
-      errorEl.textContent = 'Case #' + num + ' not found.';
+      errorEl.textContent = 'Case ' + raw + ' not found.';
       return;
     }
     modal.remove();
-    loadCase(num);
+    loadCase(raw);
   }
 
   btnGo.addEventListener('click', tryJump);
@@ -2641,10 +2625,10 @@ async function advanceToNextQueuedCase() {
       activeInversionType || 'all'
     );
     if (checkAuth(result)) return;
-    if (result.success && result.case && result.case.case_number) {
+    if (result.success && result.case && result.case.case_id) {
       queueExhausted = false;
-      currentQueuedCaseNumber = result.case.case_number;
-      loadCase(result.case.case_number);
+      currentQueuedCaseNumber = result.case.case_id;
+      loadCase(result.case.case_id);
     } else if (result.success && !result.case) {
       queueExhausted = true;
       updateNavButtons();
@@ -2683,7 +2667,7 @@ function assemblePairPayload() {
 
   return {
     // Case metadata (from corpus)
-    case_number:           c.case_number,
+    case_id:           c.case_id,
     vertical:              c.vertical,
     inversion_type:        c.inversion_type,
     subtlety:              c.subtlety,
@@ -2806,17 +2790,17 @@ function updateFlagButtonLabel() {
  * Called after every Write Pair, Skip, or Flag action so navigating
  * back to a completed case can restore its prior state.
  */
-function saveCaseRecord(caseNumber, record) {
+function saveCaseRecord(caseId, record) {
   if (!sessionProgress) return;
   if (!sessionProgress.case_records) sessionProgress.case_records = {};
-  sessionProgress.case_records[String(caseNumber)] = record;
+  sessionProgress.case_records[caseId] = record;
   // saveSession() is called by the caller after other bookkeeping
 }
 
 /**
  * Updates the case status banner and Write Pair button label.
  */
-function updateCaseStatusBanner(caseNumber) {
+function updateCaseStatusBanner(caseId) {
   var banner       = document.getElementById('case-status-banner');
   var writePairBtn = document.getElementById('btn-write-pair');
   if (!banner) return;
@@ -2824,15 +2808,15 @@ function updateCaseStatusBanner(caseNumber) {
   var skipped   = sessionProgress ? (sessionProgress.skipped_cases   || []) : [];
   var flagged   = sessionProgress ? (sessionProgress.flagged_cases   || []) : [];
   banner.className = 'case-status-banner';
-  if (completed.indexOf(caseNumber) !== -1) {
+  if (completed.indexOf(caseId) !== -1) {
     banner.classList.add('status-written');
     banner.textContent = '✓ Pair written — submitting again will replace it';
     if (writePairBtn) writePairBtn.textContent = 'Replace Pair →';
-  } else if (skipped.indexOf(caseNumber) !== -1) {
+  } else if (skipped.indexOf(caseId) !== -1) {
     banner.classList.add('status-skipped');
     banner.textContent = '○ Previously skipped';
     if (writePairBtn) writePairBtn.textContent = 'Write Pair → DPO';
-  } else if (flagged.indexOf(caseNumber) !== -1) {
+  } else if (flagged.indexOf(caseId) !== -1) {
     banner.classList.add('status-flagged');
     banner.textContent = '⚑ Previously flagged for review';
     if (writePairBtn) writePairBtn.textContent = 'Write Pair → DPO';
@@ -2847,9 +2831,9 @@ function updateCaseStatusBanner(caseNumber) {
  * Restores prior response state for a case already actioned.
  * Only written cases get full restore; skipped/flagged show banner only.
  */
-async function restoreCaseRecord(caseNumber) {
+async function restoreCaseRecord(caseId) {
   if (!sessionProgress || !sessionProgress.case_records) return;
-  var rec = sessionProgress.case_records[String(caseNumber)];
+  var rec = sessionProgress.case_records[caseId];
   if (!rec || rec.action !== 'written') return;
   // Restore STD panel
   if (rec.std_text) {
@@ -2953,8 +2937,8 @@ function initActionButtons() {
 
           // Mark case completed (only once per case)
           if (!sessionProgress.completed_cases) sessionProgress.completed_cases = [];
-          if (sessionProgress.completed_cases.indexOf(payload.case_number) === -1) {
-            sessionProgress.completed_cases.push(payload.case_number);
+          if (sessionProgress.completed_cases.indexOf(payload.case_id) === -1) {
+            sessionProgress.completed_cases.push(payload.case_id);
           }
 
           currentCasePairCount++;
@@ -2963,7 +2947,7 @@ function initActionButtons() {
           // Snapshot for status banner and response restore
           var activeConf  = document.querySelector('[data-confidence].active');
           var activeSplit = document.querySelector('[data-split].active');
-          saveCaseRecord(payload.case_number, {
+          saveCaseRecord(payload.case_id, {
             action:         'written',
             std_text:       getSlotText('std-0'),
             vai_text:       getSlotText('vai-0'),
@@ -3064,7 +3048,7 @@ function initActionButtons() {
 
       try {
         var result = await window.electronAPI.writeSkip({
-          case_number:  c.case_number,
+          case_id:  c.case_id,
           reason_code:  'cva_skip',
           reason_label: 'CVA skipped',
           cva_notes:    (document.getElementById('cva-notes') || {}).value || ''
@@ -3076,10 +3060,10 @@ function initActionButtons() {
 
           // Track in skipped_cases array for status banner
           if (!sessionProgress.skipped_cases) sessionProgress.skipped_cases = [];
-          if (sessionProgress.skipped_cases.indexOf(c.case_number) === -1) {
-            sessionProgress.skipped_cases.push(c.case_number);
+          if (sessionProgress.skipped_cases.indexOf(c.case_id) === -1) {
+            sessionProgress.skipped_cases.push(c.case_id);
           }
-          saveCaseRecord(c.case_number, {
+          saveCaseRecord(c.case_id, {
             action:    'skipped',
             cva_notes: (document.getElementById('cva-notes') || {}).value || '',
             timestamp: new Date().toISOString()
@@ -3136,7 +3120,7 @@ function initActionButtons() {
         }
 
         var result = await window.electronAPI.writeFlag({
-          case_number: c.case_number,
+          case_id: c.case_id,
           flag_type:   flagType,
           cva_notes:   cvaNotes
         });
@@ -3147,10 +3131,10 @@ function initActionButtons() {
 
           // Track in flagged_cases array for status banner
           if (!sessionProgress.flagged_cases) sessionProgress.flagged_cases = [];
-          if (sessionProgress.flagged_cases.indexOf(c.case_number) === -1) {
-            sessionProgress.flagged_cases.push(c.case_number);
+          if (sessionProgress.flagged_cases.indexOf(c.case_id) === -1) {
+            sessionProgress.flagged_cases.push(c.case_id);
           }
-          saveCaseRecord(c.case_number, {
+          saveCaseRecord(c.case_id, {
             action:    'flagged',
             flag_type: flagType,
             cva_notes: cvaNotes,
@@ -3215,8 +3199,9 @@ return loadCorpus();
     // Step 5: Case display and navigation
     initNavigation();
     initFilters();
-    var startCase = (sessionProgress && sessionProgress.last_case_number) || 1;
-    loadCase(startCase);
+    var startCase = (sessionProgress && sessionProgress.last_case_id) ||
+                    (corpus[0] && corpus[0].case_id) || '';
+    if (startCase) loadCase(startCase);
     updateProgress();
     // TODO Step 12: register keyboard shortcuts
   });
