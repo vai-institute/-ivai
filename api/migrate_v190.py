@@ -182,10 +182,20 @@ def run_if_needed(db_config: dict[str, Any]) -> None:
     """
     Apply the v1.9.0 migration if it has not already been applied.
 
+    Idempotency + failure recovery:
+        `schema_meta` is only stamped AFTER both the DB schema changes
+        AND the corpus JSONL rewrite have completed. If the corpus
+        rewrite fails mid-way, the next startup will see no
+        `schema_meta` row for `1.9.0` and will re-run the migration.
+        The DB DROP+CREATE is safe to re-run (tables were empty after
+        the previous attempt) and the corpus rewrite is per-file
+        idempotent (files already holding `case_id` are skipped).
+
     Args:
         db_config: kwargs for pymysql.connect() — same dict used elsewhere
                    in api/main.py as _DB_CONFIG.
     """
+    # --- Phase 1: DB schema (tables) ---------------------------------
     conn = pymysql.connect(**db_config)
     try:
         with conn.cursor() as cur:
@@ -199,22 +209,29 @@ def run_if_needed(db_config: dict[str, Any]) -> None:
             _ensure_audit_logs(cur)
             _drop_and_recreate_v190_tables(cur)
 
-            # Mark applied inside the same txn so we don't re-run if the
-            # corpus rewrite below partially fails.
-            cur.execute(
-                "INSERT INTO schema_meta (version, description) VALUES (%s, %s)",
-                (SCHEMA_VERSION, "Case ID rename, audit to MySQL, review/version cols"),
-            )
-
         conn.commit()
-        print("[migrate_v190] DB schema applied.")
+        print("[migrate_v190] Phase 1 of 2 — DB schema applied.")
     finally:
         conn.close()
 
-    # Corpus rewrite is a filesystem operation and has its own idempotency
-    # check (file's first case already has case_id). Done after DB commit
-    # so a half-applied schema + rewritten corpus state is impossible.
+    # --- Phase 2: Corpus rewrite (filesystem) -----------------------
+    # Per-file idempotent: any file whose first line already holds
+    # `case_id` is skipped, so a mid-loop failure can be retried
+    # cleanly on the next startup.
     _rewrite_corpus_if_needed()
+    print("[migrate_v190] Phase 2 of 2 — corpus rewrite complete.")
+
+    # --- Phase 3: Stamp schema_meta (only after both succeed) -------
+    conn = pymysql.connect(**db_config)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT IGNORE INTO schema_meta (version, description) VALUES (%s, %s)",
+                (SCHEMA_VERSION, "Case ID rename, audit to MySQL, review/version cols"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
     print(f"[migrate_v190] v{SCHEMA_VERSION} migration complete.")
 
@@ -274,12 +291,16 @@ def _rewrite_corpus_if_needed() -> None:
     Rewrite every *.jsonl file under data/corpus/ to use case_id
     (format YYMMDD-NNNNN, seed date = 260314) instead of case_number.
 
-    Idempotent: if the first JSONL file's first line already has a
-    `case_id` field, skip the rewrite.
+    Per-file idempotent: each file's first line is probed, and files
+    that already hold `case_id` (with no `case_number`) are skipped.
+    This lets a mid-loop failure be retried cleanly: already-rewritten
+    files no-op, pending files finish the job. The top-level "first
+    file only" probe that used to short-circuit the loop has been
+    removed for this reason.
 
-    Backup: before any rewrite, copy data/corpus/ to data/corpus_v1.8/
-    (but only if the backup does not already exist, so re-runs don't
-    overwrite the original backup).
+    Backup: before touching any file, copy data/corpus/ to
+    data/corpus_v1.8/ (only if the backup does not already exist — we
+    never overwrite the original backup on retry).
     """
     if not _CORPUS_DIR.exists():
         print(f"[migrate_v190] WARNING: corpus dir not found at {_CORPUS_DIR}")
@@ -290,31 +311,38 @@ def _rewrite_corpus_if_needed() -> None:
         print(f"[migrate_v190] WARNING: no *.jsonl files under {_CORPUS_DIR}")
         return
 
-    # Idempotency probe: first line of first file
-    with files[0].open("r", encoding="utf-8") as fh:
-        first = fh.readline()
-    try:
-        probe = json.loads(first)
-    except json.JSONDecodeError as exc:
-        print(f"[migrate_v190] ERROR: corpus probe JSON decode failed: {exc}")
-        return
-
-    if "case_id" in probe and "case_number" not in probe:
-        print("[migrate_v190] corpus already rewritten (case_id present) — skipping.")
-        return
-
-    # Back up the original corpus directory once
+    # Back up the original corpus directory once, before any rewrite.
     if _CORPUS_BACKUP_DIR.exists():
         print(
             f"[migrate_v190] backup already at {_CORPUS_BACKUP_DIR} — "
-            "not overwriting; proceeding with rewrite."
+            "not overwriting; proceeding with per-file rewrite."
         )
     else:
         shutil.copytree(_CORPUS_DIR, _CORPUS_BACKUP_DIR)
         print(f"[migrate_v190] backed up corpus to {_CORPUS_BACKUP_DIR}")
 
     rewritten = 0
+    skipped_files = 0
     for path in files:
+        # Per-file idempotency probe: if first non-empty line already has
+        # case_id (no case_number), leave this file untouched.
+        with path.open("r", encoding="utf-8") as fh:
+            probe_line = ""
+            for raw in fh:
+                if raw.strip():
+                    probe_line = raw
+                    break
+        if probe_line:
+            try:
+                probe = json.loads(probe_line)
+            except json.JSONDecodeError as exc:
+                print(f"[migrate_v190] ERROR: probe decode failed in {path.name}: {exc}")
+                continue
+            if "case_id" in probe and "case_number" not in probe:
+                skipped_files += 1
+                continue
+
+        # Full rewrite of this file.
         lines_out: list[str] = []
         with path.open("r", encoding="utf-8") as fh:
             for raw in fh:
@@ -324,11 +352,11 @@ def _rewrite_corpus_if_needed() -> None:
                 rec = json.loads(raw)
                 n = rec.pop("case_number", None)
                 if n is None:
-                    # Already transformed mid-file? Preserve as-is.
+                    # Already transformed row within a partially-rewritten
+                    # file. Preserve as-is.
                     lines_out.append(json.dumps(rec, ensure_ascii=False))
                     continue
                 case_id = f"{SEED_DATE}-{int(n):05d}"
-                # Put case_id first for readability, preserve other fields
                 new_rec = {"case_id": case_id, **rec}
                 lines_out.append(json.dumps(new_rec, ensure_ascii=False))
                 rewritten += 1
@@ -337,7 +365,8 @@ def _rewrite_corpus_if_needed() -> None:
 
     print(
         f"[migrate_v190] rewrote {rewritten} case record(s) across "
-        f"{len(files)} file(s)."
+        f"{len(files) - skipped_files} file(s); "
+        f"{skipped_files} file(s) already had case_id (skipped)."
     )
 
 

@@ -878,9 +878,10 @@ async def get_session(
     rows = _exec("SELECT * FROM sessions WHERE user_id = %s", (user_id,))
     row = rows[0] if rows else {}
 
-    # v1.9.0 — counter truth: derive live from the tables of record, not
-    # from the sessions row. Flagged cases are counted but do not gate
-    # queue progression.
+    # v1.9.0 — counter truth: derive ALL list + count fields from the
+    # tables of record on every read. Nothing cached in the sessions
+    # row is authoritative for these values; the renderer's status
+    # banner and progress UI therefore cannot drift from the DB.
     counts = _exec(
         "SELECT "
         "  (SELECT COUNT(*) FROM pairs WHERE user_id = %s)                                AS pairs_written, "
@@ -892,10 +893,20 @@ async def get_session(
     )
     c = counts[0] if counts else {}
 
-    try:
-        completed_cases = json.loads(row.get("completed_cases") or "[]") if row else []
-    except (json.JSONDecodeError, TypeError):
-        completed_cases = []
+    # Derived list fields (previously persisted in sessions.completed_cases
+    # as a JSON blob; now always fresh from the underlying tables).
+    completed_rows = _exec(
+        "SELECT DISTINCT case_id FROM pairs WHERE user_id = %s",
+        (user_id,),
+    )
+    skipped_rows = _exec(
+        "SELECT DISTINCT case_id FROM skips WHERE user_id = %s",
+        (user_id,),
+    )
+    flagged_rows = _exec(
+        "SELECT DISTINCT case_id FROM flags WHERE user_id = %s",
+        (user_id,),
+    )
 
     return {
         "last_case_id":     row.get("last_case_id", "") if row else "",
@@ -904,7 +915,9 @@ async def get_session(
         "pairs_holdout":    int(c.get("pairs_holdout", 0) or 0),
         "skipped":          int(c.get("skipped", 0) or 0),
         "flagged":          int(c.get("flagged", 0) or 0),
-        "completed_cases":  completed_cases,
+        "completed_cases":  [str(r["case_id"]) for r in completed_rows],
+        "skipped_cases":    [str(r["case_id"]) for r in skipped_rows],
+        "flagged_cases":    [str(r["case_id"]) for r in flagged_rows],
         "layout_preset":    row.get("layout_preset", "wide") if row else "wide",
         "review_mode":      row.get("review_mode", "staged") if row else "staged",
         "session_start":    row.get("session_start", "") if row else "",
@@ -943,17 +956,17 @@ async def update_session(
     state.last_updated = datetime.now(timezone.utc).isoformat()
     after = state.model_dump()
 
-    # v1.9.0 — ignore incoming counter fields; they are authoritatively
-    # derived in GET /session. Persist only non-counter session state.
-    # Counter columns are left untouched by UPSERT.
+    # v1.9.0 — ignore incoming counter fields AND list fields (they are
+    # authoritatively derived in GET /session). Persist only the non-
+    # derived session state below. The sessions.completed_cases column
+    # is retained for schema stability but is no longer written to.
     _run(
         "INSERT INTO sessions "
-        "  (user_id, last_case_id, completed_cases, layout_preset, review_mode, "
+        "  (user_id, last_case_id, layout_preset, review_mode, "
         "   session_start, last_updated) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
         "ON DUPLICATE KEY UPDATE "
         "  last_case_id     = VALUES(last_case_id), "
-        "  completed_cases  = VALUES(completed_cases), "
         "  layout_preset    = VALUES(layout_preset), "
         "  review_mode      = VALUES(review_mode), "
         "  session_start    = VALUES(session_start), "
@@ -961,7 +974,6 @@ async def update_session(
         (
             user_id,
             state.last_case_id,
-            json.dumps(state.completed_cases),
             state.layout_preset,
             state.review_mode,
             state.session_start,

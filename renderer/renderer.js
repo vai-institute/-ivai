@@ -3199,9 +3199,34 @@ return loadCorpus();
     // Step 5: Case display and navigation
     initNavigation();
     initFilters();
-    var startCase = (sessionProgress && sessionProgress.last_case_id) ||
-                    (corpus[0] && corpus[0].case_id) || '';
-    if (startCase) loadCase(startCase);
+
+    // v1.9.0 — On launch, always request the next Raw case from the
+    // queue so it gets claimed in queue_inflight. Previously we
+    // bootstrapped from last_case_id (or corpus[0]), which could
+    // reopen an already-worked case and skip the queue claim entirely
+    // — letting two CVAs land on the same case. Per spec: fetch
+    // session -> fetch next Raw case -> render.
+    try {
+      var launchCase = await window.electronAPI.queueNext(
+        CURRENT_USER_ID, 'all', 'all'
+      );
+      if (!checkAuth(launchCase)) {
+        if (launchCase.success && launchCase.case && launchCase.case.case_id) {
+          queueExhausted = false;
+          currentQueuedCaseId = launchCase.case.case_id;
+          loadCase(launchCase.case.case_id);
+        } else if (launchCase.success && !launchCase.case) {
+          queueExhausted = true;
+          console.log('[launch] Queue exhausted — no Raw cases remain.');
+          updateNavButtons();
+        } else {
+          console.warn('[launch] queueNext returned no case:', launchCase.error);
+        }
+      }
+    } catch (err) {
+      console.error('[launch] initial queueNext threw:', err.message);
+    }
+
     updateProgress();
     // TODO Step 12: register keyboard shortcuts
   });
