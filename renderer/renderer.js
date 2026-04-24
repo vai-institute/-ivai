@@ -115,9 +115,9 @@ let originalPrompt = '';
  * backend. Set when queue:next returns a case; cleared after a successful
  * write/skip/flag. If the CVA navigates away without acting, loadCase()
  * releases this case back to the queue.
- * @type {number|null}
+ * @type {string|null}
  */
-let currentQueuedCaseNumber = null;
+let currentQueuedCaseId = null;
 
 /**
  * True when the backend queue returns no more unworked cases.
@@ -999,9 +999,9 @@ function loadCase(caseId) {
 
   // BUG 1 fix: Release prior queued case back to the queue if the CVA
   // navigated away without writing, skipping, or flagging it.
-  if (currentQueuedCaseNumber !== null && currentQueuedCaseNumber !== caseId) {
-    window.electronAPI.queueRelease(currentQueuedCaseNumber);
-    currentQueuedCaseNumber = null;
+  if (currentQueuedCaseId !== null && currentQueuedCaseId !== caseId) {
+    window.electronAPI.queueRelease(currentQueuedCaseId);
+    currentQueuedCaseId = null;
   }
 
   // BUG 2 fix: Clear slotState before any UI reset so getSlotText() cannot
@@ -1195,7 +1195,7 @@ function initNavigation() {
         if (checkAuth(result)) { btnNext.disabled = false; btnNext.textContent = 'Next'; return; }
         if (result.success && result.case && result.case.case_id) {
           queueExhausted = false;
-          currentQueuedCaseNumber = result.case.case_id;
+          currentQueuedCaseId = result.case.case_id;
           loadCase(result.case.case_id);
         } else if (result.success && !result.case) {
           // BUG 3 fix: Set exhaustion flag so updateNavButtons() keeps Next
@@ -2627,7 +2627,7 @@ async function advanceToNextQueuedCase() {
     if (checkAuth(result)) return;
     if (result.success && result.case && result.case.case_id) {
       queueExhausted = false;
-      currentQueuedCaseNumber = result.case.case_id;
+      currentQueuedCaseId = result.case.case_id;
       loadCase(result.case.case_id);
     } else if (result.success && !result.case) {
       queueExhausted = true;
@@ -2942,7 +2942,7 @@ function initActionButtons() {
           }
 
           currentCasePairCount++;
-          currentQueuedCaseNumber = null;
+          currentQueuedCaseId = null;
 
           // Snapshot for status banner and response restore
           var activeConf  = document.querySelector('[data-confidence].active');
@@ -3069,7 +3069,7 @@ function initActionButtons() {
             timestamp: new Date().toISOString()
           });
 
-          currentQueuedCaseNumber = null;
+          currentQueuedCaseId = null;
           await saveSession();
           updateProgress();
           advanceToNextQueuedCase();
@@ -3142,7 +3142,7 @@ function initActionButtons() {
           });
 
           // Backend now releases from _in_flight on flag (flag-and-release)
-          currentQueuedCaseNumber = null;
+          currentQueuedCaseId = null;
           await saveSession();
           updateProgress();
           advanceToNextQueuedCase();
