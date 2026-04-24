@@ -51,9 +51,9 @@ const {
 
 /**
  * Railway backend base URL.
- * @see https://ivai-production.up.railway.app/health
+ * @see https://cva.vai-institute.com/health
  */
-const API_BASE = 'https://ivai-production.up.railway.app';
+const API_BASE = 'https://cva.vai-institute.com';
 
 /** Together AI endpoint — OpenAI-compatible chat completions */
 const TOGETHER_ENDPOINT = 'https://api.together.xyz/v1/chat/completions';
