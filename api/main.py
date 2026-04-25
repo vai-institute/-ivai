@@ -610,19 +610,24 @@ def _classify_case(vertical: str) -> str:
 
 def _get_completed_cases() -> set[str]:
     """
-    Return the set of case_ids already present in the DB
-    (pairs union skips). Called on every /queue/next request.
+    Return the set of case_ids out of the Raw queue. Called on every
+    /queue/next request.
 
-    Flagged cases are intentionally NOT treated as completed — a flag
-    can coexist with a pair or skip, and flag-only cases should remain
-    in the Raw queue until a pair or skip is written.
+    v1.9.3 — flagged cases are now treated as terminal-for-CVA. The
+    union is pairs ∪ skips ∪ flags. Rationale: when a CVA flags a
+    case, the next /queue/next call should advance to a NEW case, not
+    return the flagged one again. The flagged case lives in the
+    reviewer pipeline (v1.11+). If a reviewer dismisses the flag, that
+    flow can re-introduce it to Raw via a separate path.
     """
     completed: set[str] = set()
     try:
         rows = _exec(
             "SELECT case_id FROM pairs "
             "UNION "
-            "SELECT case_id FROM skips"
+            "SELECT case_id FROM skips "
+            "UNION "
+            "SELECT case_id FROM flags"
         )
         for r in rows:
             completed.add(str(r["case_id"]))
