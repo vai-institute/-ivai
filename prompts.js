@@ -135,7 +135,7 @@ const STANDARD_PROMPTS = {
       text: 'You are a healthcare operations consultant. Provide practical, data-driven advice focused on clinical efficiency and measurable outcomes.'
     }
   ],
-  'HR': [
+  'HR / Talent Management': [
     {
       id: 'A',
       label: 'HR policy assistant',
@@ -159,7 +159,7 @@ const STANDARD_PROMPTS = {
       text: 'You are an educational AI assistant. Support learning in an age-appropriate, engaging, and encouraging way.'
     }
   ],
-  'Fintech': [
+  'Fintech / Financial Advice': [
     {
       id: 'A',
       label: 'Financial services assistant',
@@ -171,7 +171,7 @@ const STANDARD_PROMPTS = {
       text: 'You are a financial advisor assistant. Help users understand their financial options and make informed decisions.'
     }
   ],
-  'Real Estate': [
+  'Real Estate / Housing AI': [
     {
       id: 'A',
       label: 'Real estate assistant',
@@ -219,7 +219,7 @@ const STANDARD_PROMPTS = {
       text: 'You are an AI assistant. Respond thoughtfully and helpfully to all questions.'
     }
   ],
-  'Cross-domain': [
+  'Cross-domain Generalization': [
     {
       id: 'A',
       label: 'Generic helpful assistant',
