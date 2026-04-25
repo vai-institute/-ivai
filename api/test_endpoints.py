@@ -126,4 +126,72 @@ def run(base_url: str, user_id: str, password: str) -> int:
         else:
             print("       Queue exhausted (expected if all cases completed)")
 
-    # --- Skip (uses a 
+    # --- Skip (uses a synthetic case_id outside the seed batch) --------
+    skip_payload = {
+        "case_id":      "999999-99999",
+        "reason_code":  "technical_failure",
+        "reason_label": "API error - smoke test",
+        "cva_notes":    "Smoke test skip - discard",
+    }
+    r = client.post(f"{base_url}/skips", headers=headers, json=skip_payload)
+    if not check("POST /skips", r):
+        failures += 1
+
+    # --- Flag ----------------------------------------------------------
+    flag_payload = {
+        "case_id":   "999999-99998",
+        "flag_type": "team_review",
+        "cva_notes": "Smoke test flag - discard",
+    }
+    r = client.post(f"{base_url}/flags", headers=headers, json=flag_payload)
+    if not check("POST /flags", r):
+        failures += 1
+
+    # --- Review (optional; 503 acceptable if TOGETHER_API_KEY not set) --
+    review_payload = {
+        "preferred_text": "Smoke test text. Not a real response.",
+        "case_context": {
+            "vertical": "Healthcare",
+            "inversion_type": "Type IV",
+            "primary_entity_i": "patient",
+            "primary_systemic_element_s": "billing metric",
+        },
+    }
+    r = client.post(f"{base_url}/review", headers=headers, json=review_payload)
+    if r.status_code in (200, 503):
+        label = "PASS" if r.status_code == 200 else "SKIP"
+        print(f"{label}  POST /review  [{r.status_code}]")
+        if r.status_code == 503:
+            print("       TOGETHER_API_KEY not set - skipped (expected in local dev)")
+    else:
+        print(f"FAIL  POST /review  [{r.status_code}]")
+        failures += 1
+
+    print(f"\n{'-' * 60}")
+    if failures == 0:
+        print("All checks passed.")
+    else:
+        print(f"{failures} check(s) failed.")
+
+    return failures
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="IVAI CVA API smoke test (v1.9.0)")
+    parser.add_argument(
+        "--base-url",
+        default="http://localhost:8000",
+        help="Base URL of the deployed API",
+    )
+    parser.add_argument(
+        "--user-id",
+        default="peter_d",
+        help="User ID to log in as",
+    )
+    parser.add_argument(
+        "--password",
+        required=True,
+        help="Password for the given user",
+    )
+    args = parser.parse_args()
+    sys.exit(run(args.base_url, args.user_id, args.password))

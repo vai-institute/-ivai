@@ -7,4 +7,14 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Local-only state (pre-MySQL artifact, retained on di
+# Local-only state (pre-MySQL artifact, retained on disk only)
+session/progress.json
+
+# Secrets — NEVER commit
+config/api_keys.json
+
+# Pre-MySQL output dir (now in MySQL)
+output/
+
+# Scratch dir for one-off patch scripts and dry-run artifacts
+outputs/
