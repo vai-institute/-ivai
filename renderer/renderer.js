@@ -1172,14 +1172,9 @@ function updateNavButtons() {
   });
 
   btnPrev.disabled = (pos <= 0);
-
-  if (queueExhausted) {
-    btnNext.disabled    = true;
-    btnNext.textContent = 'Queue empty';
-  } else {
-    btnNext.disabled    = false;
-    btnNext.textContent = 'Next ▶';
-  }
+  // v1.13.0: Next is simply corpus[pos+1] — disable at the last case.
+  btnNext.disabled    = (pos < 0 || pos >= filtered.length - 1);
+  btnNext.textContent = 'Next ▶';
 }
 
 /**
@@ -1207,32 +1202,16 @@ function initNavigation() {
   }
 
   if (btnNext) {
-    btnNext.addEventListener('click', async function() {
-      btnNext.disabled    = true;
-      btnNext.textContent = 'Loading…';
-      try {
-        var result = await window.electronAPI.queueNext(
-          CURRENT_USER_ID,
-          activeVertical      || 'all',
-          activeInversionType || 'all'
-        );
-        if (checkAuth(result)) { btnNext.disabled = false; btnNext.textContent = 'Next'; return; }
-        if (result.success && result.case && result.case.case_id) {
-          queueExhausted = false;
-          currentQueuedCaseId = result.case.case_id;
-          loadCase(result.case.case_id);
-        } else if (result.success && !result.case) {
-          // BUG 3 fix: Set exhaustion flag so updateNavButtons() keeps Next
-          // disabled instead of unconditionally re-enabling it.
-          queueExhausted = true;
-          console.warn('[nav] Queue exhausted — no more unworked cases.');
-        } else {
-          console.warn('[nav] queue:next returned no case:', result.error);
-        }
-      } catch (err) {
-        console.error('[nav] Next failed:', err.message);
-      } finally {
-        updateNavButtons();
+    // v1.13.0: Next = corpus[currentIndex + 1] in the filtered view.
+    // Simple sequential navigation — no queue API call.
+    btnNext.addEventListener('click', function() {
+      var filtered    = getFilteredCorpus();
+      var currentCase = corpus[currentIndex];
+      var pos = filtered.findIndex(function(c) {
+        return c.case_id === (currentCase || {}).case_id;
+      });
+      if (pos >= 0 && pos < filtered.length - 1) {
+        loadCase(filtered[pos + 1].case_id);
       }
     });
   }
