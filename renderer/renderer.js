@@ -3266,17 +3266,17 @@ return loadCorpus();
             var _dlg         = document.getElementById('launch-dialog');
             var _resumeLabel = document.getElementById('launch-resume-id');
             if (_resumeLabel) _resumeLabel.textContent = _lastId;
-            if (_dlg) _dlg.classList.add('visible');
+            if (_dlg) _dlg.style.display = 'flex';   // override inline display:none
 
             document.getElementById('btn-launch-first').addEventListener('click', function() {
-              if (_dlg) _dlg.classList.remove('visible');
+              if (_dlg) _dlg.style.display = 'none';
               queueExhausted = false;
               currentQueuedCaseId = _nextId;
               loadCase(_nextId);
             });
 
             document.getElementById('btn-launch-resume').addEventListener('click', async function() {
-              if (_dlg) _dlg.classList.remove('visible');
+              if (_dlg) _dlg.style.display = 'none';
               // Release the queue claim on the "first unpaired" case so
               // another CVA can pick it up, then load the resume target.
               try {
@@ -3315,6 +3315,4 @@ return loadCorpus();
     }
 
     updateProgress();
-    // TODO Step 12: register keyboard shortcuts
-  });
-});
+    // TODO Step 12: register keyboar
