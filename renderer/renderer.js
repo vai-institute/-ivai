@@ -3262,23 +3262,31 @@ return loadCorpus();
 
           // Show dialog only when the queued "first unpaired" differs from
           // the user's last unprocessed case -- otherwise just go there.
+          // v1.12.2: await a Promise so the init chain pauses until the user
+          // clicks, then loadCase runs in the same async context.
           if (_lastIsUnprocessed && _lastId !== _nextId) {
-            var _dlg         = document.getElementById('launch-dialog');
-            var _resumeLabel = document.getElementById('launch-resume-id');
-            if (_resumeLabel) _resumeLabel.textContent = _lastId;
-            if (_dlg) _dlg.style.display = 'flex';   // override inline display:none
+            var _choice = await new Promise(function(resolve) {
+              var _dlg = document.getElementById('launch-dialog');
+              var _resumeLabel = document.getElementById('launch-resume-id');
+              if (_resumeLabel) _resumeLabel.textContent = _lastId;
+              if (_dlg) _dlg.style.display = 'flex';
+              document.getElementById('btn-launch-first').addEventListener('click', function() {
+                if (_dlg) _dlg.style.display = 'none';
+                resolve('first');
+              }, { once: true });
+              document.getElementById('btn-launch-resume').addEventListener('click', function() {
+                if (_dlg) _dlg.style.display = 'none';
+                resolve('resume');
+              }, { once: true });
+            });
 
-            document.getElementById('btn-launch-first').addEventListener('click', function() {
-              if (_dlg) _dlg.style.display = 'none';
+            if (_choice === 'first') {
               queueExhausted = false;
               currentQueuedCaseId = _nextId;
               loadCase(_nextId);
-            });
-
-            document.getElementById('btn-launch-resume').addEventListener('click', async function() {
-              if (_dlg) _dlg.style.display = 'none';
-              // Release the queue claim on the "first unpaired" case so
-              // another CVA can pick it up, then load the resume target.
+            } else {
+              // Release the queue claim on the "first unpaired" so another
+              // CVA can pick it up, then load the resume target.
               try {
                 await window.electronAPI.queueRelease(_nextId);
               } catch (e) {
@@ -3286,7 +3294,7 @@ return loadCorpus();
               }
               currentQueuedCaseId = _lastId;
               loadCase(_lastId);
-            });
+            }
 
           } else {
             // No ambiguity -- go straight to the first queued case
@@ -3307,12 +3315,14 @@ return loadCorpus();
             updateNavButtons();
           }
         } else {
-          console.warn('[launch] queueNext returned no case:', launchCase.error);
+          console.warn("[launch] queueNext returned no case:", launchCase.error);
         }
       }
     } catch (err) {
-      console.error('[launch] initial queueNext threw:', err.message);
+      console.error("[launch] initial queueNext threw:", err.message);
     }
 
     updateProgress();
-    // TODO Step 12: register keyboar
+    // TODO Step 12: register keyboard shortcuts
+  });
+});

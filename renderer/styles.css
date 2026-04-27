@@ -1069,7 +1069,7 @@ body {
 /* ── 11. Dialog overlay (shared by jump, launch, and future modals) ────────── */
 
 .dialog-overlay {
-  display: none;           /* hidden by default; show via style.display = 'flex' */
+  display: none;           /* hidden by default */
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
@@ -1077,6 +1077,8 @@ body {
   align-items: center;
   justify-content: center;
 }
+/* Jump modal uses classList.add('visible') — this rule restores that path */
+.dialog-overlay.visible { display: flex; }
 
 .dialog-card {
   background: #fff;
@@ -1629,5 +1631,4 @@ body {
 }
 /* Each button uses its own highlight color as background */
 .ql-toolbar .ql-highlight-i { background: #b7f7c2; color: #1a5c2a; }
-.ql-toolbar .ql-highlight-e { background: #ffe0b2; color: #7a3c00; }
-.ql-toolbar .ql-highlight-s 
+.ql-too

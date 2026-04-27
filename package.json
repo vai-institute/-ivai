@@ -1,6 +1,6 @@
 {
   "name": "ivai-cva-tool",
-  "version": "1.12.1",
+  "version": "1.12.2",
   "description": "CVA Curation Tool \u2014 IVAI DPO Training Pair Workstation",
   "main": "main.js",
   "scripts": {
