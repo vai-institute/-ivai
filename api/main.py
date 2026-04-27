@@ -35,6 +35,7 @@ from pathlib import Path as _PathForMigrate
 _sys_for_migrate.path.insert(0, str(_PathForMigrate(__file__).parent))
 import migrate_v190
 import migrate_v1_10_0
+import migrate_v1_11_0
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -251,6 +252,7 @@ async def _startup_db() -> None:
     # Idempotent via schema_meta; no-ops once applied.
     migrate_v190.run_if_needed(_DB_CONFIG)
     migrate_v1_10_0.run_if_needed(_DB_CONFIG)
+    migrate_v1_11_0.run_if_needed(_DB_CONFIG)
     _run_migrations()
     _seed_users()
     _restore_inflight()
@@ -664,6 +666,7 @@ class SessionState(BaseModel):
     completed_cases: list[str] = Field(default_factory=list)
     layout_preset: str = "wide"
     review_mode: str = "staged"
+    std_variant: str = "0"
 
 
 class PairSubmission(BaseModel):
@@ -928,6 +931,7 @@ async def get_session(
         "flagged_cases":    [str(r["case_id"]) for r in flagged_rows],
         "layout_preset":    row.get("layout_preset", "wide") if row else "wide",
         "review_mode":      row.get("review_mode", "staged") if row else "staged",
+        "std_variant":      row.get("std_variant", "0") if row else "0",
         "session_start":    row.get("session_start", "") if row else "",
         "last_updated":     row.get("last_updated", "") if row else "",
     }
@@ -971,12 +975,13 @@ async def update_session(
     _run(
         "INSERT INTO sessions "
         "  (user_id, last_case_id, layout_preset, review_mode, "
-        "   session_start, last_updated) "
-        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "   std_variant, session_start, last_updated) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
         "ON DUPLICATE KEY UPDATE "
         "  last_case_id     = VALUES(last_case_id), "
         "  layout_preset    = VALUES(layout_preset), "
         "  review_mode      = VALUES(review_mode), "
+        "  std_variant      = VALUES(std_variant), "
         "  session_start    = VALUES(session_start), "
         "  last_updated     = VALUES(last_updated)",
         (
@@ -984,6 +989,7 @@ async def update_session(
             state.last_case_id,
             state.layout_preset,
             state.review_mode,
+            state.std_variant,
             state.session_start,
             state.last_updated,
         ),

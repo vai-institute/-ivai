@@ -285,7 +285,8 @@ async function initSession() {
         last_updated:    new Date().toISOString(),
         completed_cases: [],
         layout_preset:   'wide',
-        review_mode:     'staged'
+        review_mode:     'staged',
+        std_variant:     '0'
       };
       console.log('[session] First launch — fresh in-memory session.');
       return;
@@ -608,6 +609,22 @@ function initLayoutPresets() {
   // Apply saved layout from session, defaulting to Wide
   var saved = (sessionProgress && sessionProgress.layout) || 'wide';
   applyLayoutPreset(saved);
+
+  // Restore saved std-variant (default '0' for new CVAs)
+  var variantSel = document.getElementById('std-variant-select');
+  if (variantSel) {
+    variantSel.value = (sessionProgress && sessionProgress.std_variant) || '0';
+  }
+
+  // Persist variant selection across sessions
+  if (variantSel) {
+    variantSel.addEventListener('change', function() {
+      if (sessionProgress) {
+        sessionProgress.std_variant = variantSel.value;
+        saveSession();
+      }
+    });
+  }
 }
 
 // ─── Step 4: Drag handle resize logic ────────────────────────────────────────
