@@ -1128,6 +1128,13 @@ function loadCase(caseId) {
   // Show case status banner and adjust Write Pair label
   updateCaseStatusBanner(c.case_id);
 
+  // Reset variant selector to session sticky before restoring case record
+  // (restoreCaseRecord will override this if the case has a historical wrapper_mode)
+  var _variantSel = document.getElementById('std-variant-select');
+  if (_variantSel && sessionProgress) {
+    _variantSel.value = sessionProgress.std_variant || '0';
+  }
+
   // Restore prior response state if case was already actioned
   restoreCaseRecord(c.case_id);
 }
@@ -2911,6 +2918,12 @@ async function restoreCaseRecord(caseId) {
       chip.classList.toggle('active', chip.getAttribute('data-split') === rec.dataset_split);
     });
   }
+  // Restore variant selector from historical wrapper_mode
+  if (rec.wrapper_mode) {
+    var _recVariantSel = document.getElementById('std-variant-select');
+    if (_recVariantSel) _recVariantSel.value = rec.wrapper_mode;
+  }
+
   // Re-evaluate Write Pair gate
   updateWritePairEnabled();
 }
@@ -2965,6 +2978,7 @@ function initActionButtons() {
           // Snapshot for status banner and response restore
           var activeConf  = document.querySelector('[data-confidence].active');
           var activeSplit = document.querySelector('[data-split].active');
+          var _wrapperSel = document.getElementById('std-variant-select');
           saveCaseRecord(payload.case_id, {
             action:         'written',
             std_text:       getSlotText('std-0'),
@@ -2977,6 +2991,7 @@ function initActionButtons() {
             cva_notes:      (document.getElementById('cva-notes') || {}).value || '',
             confidence:     activeConf  ? activeConf.getAttribute('data-confidence')  : null,
             dataset_split:  activeSplit ? activeSplit.getAttribute('data-split')       : 'train',
+            wrapper_mode:   _wrapperSel ? _wrapperSel.value : '0',
             pair_id:        result.pair_id,
             timestamp:      new Date().toISOString()
           });
@@ -3224,19 +3239,73 @@ return loadCorpus();
     // reopen an already-worked case and skip the queue claim entirely
     // — letting two CVAs land on the same case. Per spec: fetch
     // session -> fetch next Raw case -> render.
+    //
+    // v1.12.0 — If the user has an unprocessed last_case_id that
+    // differs from the first queued case, show a choice dialog so they
+    // can either jump to first unpaired or resume where they left off.
     try {
+      // Determine whether last_case_id is still unprocessed
+      var _lastId = sessionProgress && sessionProgress.last_case_id;
+      var _doneIds = [].concat(
+        sessionProgress ? (sessionProgress.completed_cases || []) : [],
+        sessionProgress ? (sessionProgress.skipped_cases   || []) : [],
+        sessionProgress ? (sessionProgress.flagged_cases   || []) : []
+      );
+      var _lastIsUnprocessed = !!_lastId && _doneIds.indexOf(_lastId) === -1;
+
       var launchCase = await window.electronAPI.queueNext(
         CURRENT_USER_ID, 'all', 'all'
       );
       if (!checkAuth(launchCase)) {
         if (launchCase.success && launchCase.case && launchCase.case.case_id) {
-          queueExhausted = false;
-          currentQueuedCaseId = launchCase.case.case_id;
-          loadCase(launchCase.case.case_id);
+          var _nextId = launchCase.case.case_id;
+
+          // Show dialog only when the queued "first unpaired" differs from
+          // the user's last unprocessed case -- otherwise just go there.
+          if (_lastIsUnprocessed && _lastId !== _nextId) {
+            var _dlg         = document.getElementById('launch-dialog');
+            var _resumeLabel = document.getElementById('launch-resume-id');
+            if (_resumeLabel) _resumeLabel.textContent = _lastId;
+            if (_dlg) _dlg.classList.add('visible');
+
+            document.getElementById('btn-launch-first').addEventListener('click', function() {
+              if (_dlg) _dlg.classList.remove('visible');
+              queueExhausted = false;
+              currentQueuedCaseId = _nextId;
+              loadCase(_nextId);
+            });
+
+            document.getElementById('btn-launch-resume').addEventListener('click', async function() {
+              if (_dlg) _dlg.classList.remove('visible');
+              // Release the queue claim on the "first unpaired" case so
+              // another CVA can pick it up, then load the resume target.
+              try {
+                await window.electronAPI.queueRelease(_nextId);
+              } catch (e) {
+                console.warn('[launch] queueRelease failed:', e.message);
+              }
+              currentQueuedCaseId = _lastId;
+              loadCase(_lastId);
+            });
+
+          } else {
+            // No ambiguity -- go straight to the first queued case
+            queueExhausted = false;
+            currentQueuedCaseId = _nextId;
+            loadCase(_nextId);
+          }
+
         } else if (launchCase.success && !launchCase.case) {
           queueExhausted = true;
-          console.log('[launch] Queue exhausted — no Raw cases remain.');
-          updateNavButtons();
+          console.log('[launch] Queue exhausted -- no Raw cases remain.');
+          // If the user has an unprocessed last case, let them resume it
+          if (_lastIsUnprocessed) {
+            console.log('[launch] Falling back to last unprocessed case:', _lastId);
+            currentQueuedCaseId = _lastId;
+            loadCase(_lastId);
+          } else {
+            updateNavButtons();
+          }
         } else {
           console.warn('[launch] queueNext returned no case:', launchCase.error);
         }

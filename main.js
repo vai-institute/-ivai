@@ -34,7 +34,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
 const path   = require('path');
 const fs     = require('fs');
 const { marked } = require('marked');
@@ -99,6 +99,84 @@ let _corpusLoaded = false;
  */
 let _activeUserId = '';
 let _accessToken  = '';
+
+// ─── Auth persistence (safeStorage) ──────────────────────────────────────────
+
+/**
+ * Path to the encrypted auth file stored in Electron's userData directory.
+ * On Windows this is %APPDATA%\ivai-cva-tool\auth.enc (local, never OneDrive).
+ */
+const _authFilePath = () => path.join(app.getPath('userData'), 'auth.enc');
+
+/**
+ * Encrypts {token, userId} and writes to the auth file.
+ * Silent no-op if safeStorage is unavailable.
+ */
+function _saveAuth(token, userId) {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return;
+    const encrypted = safeStorage.encryptString(JSON.stringify({ token, userId }));
+    fs.writeFileSync(_authFilePath(), encrypted);
+  } catch (e) {
+    console.warn('[auth] _saveAuth failed:', e.message);
+  }
+}
+
+/**
+ * Loads and decrypts the auth file.
+ * Returns { token, userId } if the stored JWT is still valid, else null.
+ * Deletes the file if the token has expired.
+ */
+function _loadAuth() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    const fp = _authFilePath();
+    if (!fs.existsSync(fp)) return null;
+    const decrypted = safeStorage.decryptString(fs.readFileSync(fp));
+    const { token, userId } = JSON.parse(decrypted);
+    // Decode JWT payload (base64url) to check expiry without a network call
+    const parts = token.split('.');
+    if (parts.length !== 3) { fs.unlinkSync(fp); return null; }
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (!payload.exp || Math.floor(Date.now() / 1000) >= payload.exp) {
+      fs.unlinkSync(fp);
+      return null;
+    }
+    return { token, userId };
+  } catch (e) {
+    console.warn('[auth] _loadAuth failed:', e.message);
+    return null;
+  }
+}
+
+/**
+ * Returns the userId from the saved auth file without validating the token.
+ * Used only to pre-fill the login form username field.
+ */
+function _savedUsername() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    const fp = _authFilePath();
+    if (!fs.existsSync(fp)) return null;
+    const decrypted = safeStorage.decryptString(fs.readFileSync(fp));
+    const { userId } = JSON.parse(decrypted);
+    return userId || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Deletes the auth file, clearing all persisted credentials.
+ */
+function _clearAuth() {
+  try {
+    const fp = _authFilePath();
+    if (fs.existsSync(fp)) fs.unlinkSync(fp);
+  } catch (e) {
+    console.warn('[auth] _clearAuth failed:', e.message);
+  }
+}
 
 // ─── Streaming state ──────────────────────────────────────────────────────────
 
@@ -196,7 +274,17 @@ function createMainWindow() {
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
-  createLoginWindow();
+  // v1.12.0 — Try to restore a previous session from encrypted storage.
+  // If the saved JWT is still valid, skip the login screen entirely.
+  const _saved = _loadAuth();
+  if (_saved) {
+    _accessToken  = _saved.token;
+    _activeUserId = _saved.userId;
+    console.log('[auth] Auto-login from saved credentials for:', _activeUserId);
+    createMainWindow();
+  } else {
+    createLoginWindow();
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createLoginWindow();
   });
@@ -242,6 +330,7 @@ ipcMain.handle('auth:login', async (_event, { userId, password }) => {
     const data = await res.json();
     _accessToken  = data.access_token;
     _activeUserId = data.user_id;
+    _saveAuth(data.access_token, data.user_id);   // v1.12.0 — persist JWT
     if (loginWindow) { loginWindow.close(); loginWindow = null; }
     createMainWindow();
     return { success: true };
@@ -256,12 +345,17 @@ ipcMain.handle('auth:login', async (_event, { userId, password }) => {
 ipcMain.handle('auth:logout', () => {
   _accessToken  = '';
   _activeUserId = '';
+  _clearAuth();                                   // v1.12.0 — wipe saved JWT
   if (mainWindow) { mainWindow.close(); mainWindow = null; }
   createLoginWindow();
 });
 
 /** IPC: auth:get-user -- return user info without exposing the token. */
 ipcMain.handle('auth:get-user', () => ({ userId: _activeUserId }));
+
+/** IPC: auth:get-saved-username -- return the userId from the saved auth file,
+ *  used only to pre-fill the login form. Returns null if nothing is saved. */
+ipcMain.handle('auth:get-saved-username', () => _savedUsername());
 
 ipcMain.handle('app:restart', () => {
   app.relaunch();
@@ -1002,89 +1096,4 @@ ipcMain.handle('cortex:review', async (_event, params) => {
       try {
         const errJson = await response.json();
         const detail  = errJson.detail || {};
-        if (detail.error === 'model_unavailable') {
-          return { error: 'model_unavailable', model: detail.model, message: detail.message };
-        }
-      } catch (_) { /* not JSON — fall through */ }
-      throw new Error(`Cortex review failed: ${response.status} ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (err) {
-    console.error('[cortex:review]', err.message);
-    return { has_issues: false, flags: [], error: err.message };
-  }
-});
-
-// ── Markdown rendering ────────────────────────────────────────────────────────
-
-/**
- * IPC handler: render-markdown
- * @param {Electron.IpcMainInvokeEvent} _event
- * @param {string} markdown
- * @returns {string} HTML
- */
-ipcMain.handle('render-markdown', (_event, markdown) => {
-  return marked.parse(markdown || '');
-});
-
-// ── API key configuration ─────────────────────────────────────────────────────
-
-/**
- * IPC handler: config:read-keys
- * @returns {{ together_ai: string, openai: string, anthropic: string,
- *             cortex_endpoint: string, cortex_model: string }}
- */
-ipcMain.handle('config:read-keys', () => {
-  const defaults = {
-    together_ai:      '',
-    openai:           '',
-    anthropic:        '',
-    cortex_endpoint:  'railway',
-    cortex_model:     'meta-llama/Llama-3.3-70B-Instruct-Turbo'
-  };
-  try {
-    if (!fs.existsSync(API_KEYS_PATH)) return defaults;
-    const data = JSON.parse(fs.readFileSync(API_KEYS_PATH, 'utf8'));
-    return {
-      together_ai:     data.together_ai     || '',
-      openai:          data.openai          || '',
-      anthropic:       data.anthropic       || '',
-      google:          data.google          || '',
-      cortex_endpoint: data.cortex_endpoint || 'railway',
-      cortex_model:    data.cortex_model    || 'meta-llama/Llama-3.3-70B-Instruct-Turbo'
-    };
-  } catch (err) {
-    console.warn('[config] Could not read api_keys.json:', err.message);
-    return defaults;
-  }
-});
-
-/**
- * IPC handler: config:write-keys
- * @param {Electron.IpcMainInvokeEvent} _event
- * @param {Object} keys
- * @returns {{ ok: boolean, error: string|null }}
- */
-ipcMain.handle('config:write-keys', (_event, keys) => {
-  try {
-    const data = {
-      _comment:        'CVA Tool API key configuration. Edit here or via gear icon.',
-      together_ai:     keys.together_ai     || '',
-      openai:          keys.openai          || '',
-      anthropic:       keys.anthropic       || '',
-      google:          keys.google          || '',
-      cortex_endpoint: keys.cortex_endpoint || 'railway',
-      cortex_model:    keys.cortex_model    || 'meta-llama/Llama-3.3-70B-Instruct-Turbo'
-    };
-    fs.writeFileSync(API_KEYS_PATH, JSON.stringify(data, null, 2), 'utf8');
-    console.log('[config] API keys saved.');
-    return { ok: true, error: null };
-  } catch (err) {
-    console.error('[config] Write keys failed:', err.message);
-    return { ok: false, error: err.message };
-  }
-});
-
-// ── Steps 13, 16–20 — added in their respective steps ────────────────────────
-// Step 13: 'curation:open-window'
-// Steps 16–20: review and 
+        if (detail.

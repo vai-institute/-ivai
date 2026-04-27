@@ -546,7 +546,20 @@
         <button class="btn-dialog-secondary" id="btn-settings-cancel">Cancel</button>
         <button class="btn-dialog-primary"   id="btn-settings-save">Save Keys</button>
       </div>
-      <div style="font-size:11px;color:#888;text-align:center;margin-top:8px;">v1.11.1</div>
+      <div style="font-size:11px;color:#888;text-align:center;margin-top:8px;">v1.12.0</div>
+    </div>
+  </div>
+
+  <!-- v1.12.0: Launch choice dialog — first unpaired vs resume -->
+  <div class="dialog-overlay" id="launch-dialog" style="display:none;">
+    <div class="dialog-card" style="max-width:400px;">
+      <div class="dialog-title" style="margin-bottom:12px;">Where would you like to start?</div>
+      <p style="font-size:13px;color:#bbb;margin-bottom:4px;">You were last working on case</p>
+      <p style="font-size:14px;font-weight:600;color:#90caf9;margin-bottom:20px;" id="launch-resume-id">—</p>
+      <div class="dialog-btn-row">
+        <button class="btn-dialog-secondary" id="btn-launch-first">&#x25B6; First unpaired</button>
+        <button class="btn-dialog-primary"   id="btn-launch-resume">&#x21A9; Resume</button>
+      </div>
     </div>
   </div>
 

@@ -65,6 +65,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
    *  @returns {Promise<{ userId: string }>} */
   getAuthUser: () => ipcRenderer.invoke('auth:get-user'),
 
+  /** Return the userId stored in encrypted local credentials (for pre-filling
+   *  the login form). Returns null if no saved credentials exist or they have
+   *  expired. The token itself is never exposed to the renderer.
+   *  @returns {Promise<string|null>} */
+  getSavedUsername: () => ipcRenderer.invoke('auth:get-saved-username'),
+
   // ── User management ─────────────────────────────────────────────────────────
 
   /**
@@ -265,12 +271,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /**
    * Submits a flag record to the Railway API.
    * @param {Object} flagData - Flag payload
-   * @returns {Promise<{ success: boolean, flag_id?: string, error?: string }>}
-   */
-  writeFlag: (flagData) => ipcRenderer.invoke('write-flag', flagData),
-
-  // ── Steps 13, 16–20 — added in their respective steps ──────────────────────
-  // Step 13: openCurationWindow, onCurationCaseUpdate
-  // Steps 16–20: review and audit channels
-
-});
+   * @returns {Promise<{ success: boolean, flag_id?: strin
