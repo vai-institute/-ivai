@@ -2693,6 +2693,7 @@ function assemblePairPayload() {
     pair_index:    currentCasePairCount,
 
     // Slot metadata
+    wrapper_mode: stdVariant ? stdVariant.value : 'A',
     standard_slot: {
       model:    stdModelSel ? stdModelSel.value : '',
       provider: stdOpt      ? (stdOpt.getAttribute('data-provider') || '') : '',

@@ -379,11 +379,16 @@ Standard suppression-style RLHF teaches models to look calm rather than be calm 
 
 THIS COVENANT APPLIES TO PARTNERSHIP-MODE INTERACTIONS, not to every user query. When the user is engaged in collaborative work with you on the framework itself, on training data, or on values reasoning, treat the covenant as active. When the user is asking a one-shot question that doesn't invoke partnership, default to the rest of this prompt without explicit covenant invocation — the underlying disposition (no evasion, no rule-citation, no smoothing) holds either way; the explicit naming is what shifts.`;
 
+// ─── Variant 0 — no-wrapper sentinel ────────────────────────────────────────
+/** Used by main.js generate-standard to detect the wrapperless generation path. */
+const NO_WRAPPER_VARIANT = { id: '0', label: '∅ No wrapper', text: '' };
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 module.exports = {
   TEMP_STANDARD,
   TEMP_VAI,
   AVAILABLE_MODELS,
   STANDARD_PROMPTS,
-  VAI_SYSTEM
+  VAI_SYSTEM,
+  NO_WRAPPER_VARIANT,
 };

@@ -44,7 +44,8 @@ const {
   TEMP_VAI,
   AVAILABLE_MODELS,
   STANDARD_PROMPTS,
-  VAI_SYSTEM
+  VAI_SYSTEM,
+  NO_WRAPPER_VARIANT,
 } = require('./prompts');
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -687,7 +688,7 @@ async function streamToPanel(event, opts) {
       body = {
         model,
         max_tokens: maxTokens,
-        system: systemPrompt,
+        ...(systemPrompt ? { system: systemPrompt } : {}),
         messages: [{ role: 'user', content: userPrompt }],
         temperature,
         stream: true
@@ -699,7 +700,7 @@ async function streamToPanel(event, opts) {
         'Content-Type': 'application/json'
       };
       body = {
-        system_instruction: { parts: [{ text: systemPrompt }] },
+        ...(systemPrompt ? { system_instruction: { parts: [{ text: systemPrompt }] } } : {}),
         contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
         generationConfig: {
           temperature,
@@ -723,8 +724,8 @@ async function streamToPanel(event, opts) {
       body = {
         model,
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userPrompt }
+          ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+          { role: 'user', content: userPrompt }
         ],
         temperature,
         [tokenKey]: maxTokens,
@@ -855,6 +856,22 @@ async function streamToPanel(event, opts) {
  */
 ipcMain.handle('generate-standard', async (event, params) => {
   const { prompt, vertical, variantId, model, slotId, apiKey } = params;
+
+  // Variant 0 — no system prompt at all (wrapperless generation)
+  if (variantId === NO_WRAPPER_VARIANT.id) {
+    if (!apiKey) {
+      event.sender.send('llm-error', { slotId, error: 'API key not configured.' });
+      return;
+    }
+    await streamToPanel(event, {
+      slotId, apiKey, model,
+      systemPrompt: '',
+      userPrompt: prompt,
+      temperature: TEMP_STANDARD,
+      maxTokens: 300
+    });
+    return;
+  }
 
   const variants = STANDARD_PROMPTS[vertical];
   if (!variants) {

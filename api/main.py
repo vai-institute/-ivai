@@ -34,6 +34,7 @@ import sys as _sys_for_migrate
 from pathlib import Path as _PathForMigrate
 _sys_for_migrate.path.insert(0, str(_PathForMigrate(__file__).parent))
 import migrate_v190
+import migrate_v1_10_0
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -249,6 +250,7 @@ async def _startup_db() -> None:
     # v1.9.0: schema foundation (case_id rename, audit_logs, review cols).
     # Idempotent via schema_meta; no-ops once applied.
     migrate_v190.run_if_needed(_DB_CONFIG)
+    migrate_v1_10_0.run_if_needed(_DB_CONFIG)
     _run_migrations()
     _seed_users()
     _restore_inflight()
@@ -686,6 +688,7 @@ class PairSubmission(BaseModel):
     # Compliance fields
     data_classification: Optional[str] = "general"
     ferpa_consent: Optional[bool] = False
+    wrapper_mode: Optional[str] = "A"
 
 
 class SkipSubmission(BaseModel):
@@ -1172,8 +1175,8 @@ async def submit_pair(
         "INSERT INTO pairs "
         "  (pair_id, user_id, case_id, pair_index, dataset_split, "
         "   vertical, inversion_type, data_classification, "
-        "   ferpa_blocked, pii_scrubbed, payload) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "   ferpa_blocked, pii_scrubbed, wrapper_mode, payload) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             pair_id,
             user["_user_id"],
@@ -1185,6 +1188,7 @@ async def submit_pair(
             pair.data_classification or "general",
             int(ferpa_blocked),
             int(PRESIDIO_AVAILABLE),
+            pair.wrapper_mode or "A",
             json.dumps(record),
         ),
     )
