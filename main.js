@@ -429,7 +429,8 @@ ipcMain.handle('session:read', async (_event, userId) => {
       last_updated:     raw.last_updated     || new Date().toISOString(),
       completed_cases:  raw.completed_cases  || [],
       layout_preset:    raw.layout_preset    || 'wide',
-      review_mode:      raw.review_mode      || 'staged'
+      review_mode:      raw.review_mode      || 'staged',
+      std_variant:      raw.std_variant      || '0'
     };
     return { success: true, session };
   } catch (err) {
